@@ -275,5 +275,6 @@ def main():
     last_date = full_df["date"].max()
     print("\nData last date:", last_date)
 
+    print("new feature")
 if __name__ == "__main__":
     main()
