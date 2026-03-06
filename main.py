@@ -475,5 +475,53 @@ def main():
     print(f"Net Profit: {round(profit, 2)} units")
     print(f"ROI: {round(roi, 2)}%")
 
+
+    # --- PREDICTION MODE FOR UPCOMING MATCHES (March 6-9, 2026) ---
+    print("\n" + "="*50)
+    print("=== ΣΤΟΙΧΗΜΑΤΙΚΕΣ ΠΡΟΒΛΕΨΕΙΣ ΤΡΙΗΜΕΡΟΥ (6-9 ΜΑΡΤΙΟΥ) ===")
+    print("="*50)
+    
+    upcoming_bets = []
+
+    for league in leagues:
+        df_league = load_league_data(league)
+        # Φιλτράρουμε αγώνες που δεν έχουν σκορ (είναι στο μέλλον)
+        future_matches = df_league[df_league["home_goals"].isna() | (df_league["home_goals"] == "")].copy()
+        
+        if future_matches.empty:
+            continue
+
+        # Υπολογισμός Probabilities μέσω του Meta-Model για αυτούς τους αγώνες
+        # (Εδώ χρησιμοποιούμε τις παραμέτρους που βρήκε το Tuning για τη συγκεκριμένη χώρα)
+        f_probs_raw, _, f_mkt, f_aux = streaming_block_probs_home_away(
+            future_matches, df_league, beta=best_beta, rho=best_rho, decay=best_decay, K=best_K, home_adv=best_ha
+        )
+        f_probs_model = temperature_scale_probs(f_probs_raw, best_T)
+        X_f = build_meta_features(f_probs_model, f_mkt, f_aux)
+        f_probs_meta = meta_final.predict_proba(X_f)
+        
+        raw_odds_f = future_matches[["odds_home", "odds_draw", "odds_away"]].values
+
+        for i, (_, row) in enumerate(future_matches.iterrows()):
+            p_h, p_d, p_a = f_probs_meta[i]
+            o_h, o_d, o_a = raw_odds_f[i]
+            
+            evs = [(p_h * o_h - 1, "1", o_h), (p_d * o_d - 1, "X", o_d), (p_a * o_a - 1, "2", o_a)]
+            best_ev, choice, odds = max(evs)
+
+            if best_ev: # Εμφάνιση μόνο αν το Value είναι > 5%
+                upcoming_bets.append({
+                    "League": league.upper(),
+                    "Match": f"{row['home_team']} vs {row['away_team']}",
+                    "Pick": choice,
+                    "Odds": odds,
+                    "Model_Prob": round(max(p_h, p_d, p_a)*100, 1),
+                    "Edge": round(best_ev*100, 1)
+                })
+
+    # Εκτύπωση αποτελεσμάτων σε πίνακα
+        bets_df = pd.DataFrame(upcoming_bets)
+        print(bets_df.sort_values(by="Edge", ascending=False).to_string(index=False))
+
 if __name__ == "__main__":
     main()
