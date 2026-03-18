@@ -57,6 +57,7 @@ def generate_upcoming_matchday_picks(
 
         from src.elo import expected_score, match_result, margin_multiplier
         ratings = {}
+        elo_history = {} # NEW: Ιστορικό για υπολογισμό Momentum
 
         def get_dynamic_init_local(current_ratings, default_init=1500.0):
             if len(current_ratings) >= 5:
@@ -64,27 +65,38 @@ def generate_upcoming_matchday_picks(
                 return float(sum(bottom_elos) / len(bottom_elos))
             return float(default_init)
 
-        def update_ratings_local(matches_batch, current_ratings):
+        def update_ratings_local(matches_batch, current_ratings, current_history):
             for _, m in matches_batch.iterrows():
                 h, a = m["home_team"], m["away_team"]
                 dyn_init = get_dynamic_init_local(current_ratings)
                 r_h = current_ratings.get(h, dyn_init)
                 r_a = current_ratings.get(a, dyn_init)
 
-                if h not in current_ratings:
-                    current_ratings[h] = r_h
-                if a not in current_ratings:
-                    current_ratings[a] = r_a
+                if h not in current_ratings: current_ratings[h] = r_h
+                if a not in current_ratings: current_ratings[a] = r_a
+                if h not in current_history: current_history[h] = []
+                if a not in current_history: current_history[a] = []
 
                 exp_h = expected_score(r_h + params["ha"], r_a)
                 s_h, s_a = match_result(int(m["home_goals"]), int(m["away_goals"]))
                 mult = margin_multiplier(int(m["home_goals"]) - int(m["away_goals"]))
 
-                current_ratings[h] = r_h + (params["K"] * mult) * (s_h - exp_h)
-                current_ratings[a] = r_a + (params["K"] * mult) * (s_a - (1 - exp_h))
-            return current_ratings
+                new_r_h = r_h + (params["K"] * mult) * (s_h - exp_h)
+                new_r_a = r_a + (params["K"] * mult) * (s_a - (1 - exp_h))
 
-        ratings = update_ratings_local(played_df, ratings)
+                current_ratings[h] = new_r_h
+                current_ratings[a] = new_r_a
+                current_history[h].append(new_r_h)
+                current_history[a].append(new_r_a)
+
+            return current_ratings, current_history
+
+        def get_momentum_local(team, current_r, history, window=4):
+            if team not in history or len(history[team]) < window:
+                return 0.0
+            return current_r - history[team][-window]
+
+        ratings, elo_history = update_ratings_local(played_df, ratings, elo_history)
 
         l_avg_h, l_avg_a, att_h, def_h, att_a, def_a = fit_team_strengths_home_away_weighted(
             played_df, decay=params["decay"]
@@ -117,10 +129,20 @@ def generate_upcoming_matchday_picks(
                     row["odds_home"], row["odds_draw"], row["odds_away"]
                 ).tolist()
             )
+            
+            # Υπολογισμός Momentum
+            mom_h = get_momentum_local(ht, elo_h, elo_history, window=4) / 400.0
+            mom_a = get_momentum_local(at, elo_a, elo_history, window=4) / 400.0
+            mom_diff = mom_h - mom_a
+
+            # Πλέον στέλνουμε τις 6 μεταβλητές!
             fixture_aux.append([
                 (elo_h - elo_a) / 400.0,
                 lam_h + lam_a,
                 lam_h - lam_a,
+                mom_h,
+                mom_a,
+                mom_diff
             ])
             fixture_lambdas.append([lam_h, lam_a])
 
@@ -143,16 +165,7 @@ def generate_upcoming_matchday_picks(
             future_mlp_probs_raw,
             float(mlp_cfg["temperature"]),
         )
-        future_blend_probs = blend_probabilities(
-            league_best_params[league].get("blend_weights", None) or None,
-            {"base": fixture_model_probs, "market": fixture_market_fixed, "xgb": future_meta_probs, "mlp": future_mlp_probs},
-        ) if False else None
-        # use saved global blend config passed through mlp_cfg container? no; handled by caller below
-
-        # placeholder overwritten by caller pattern? keep direct average impossible.
-        # To preserve existing behavior, caller should patch returned blocks instead. Not used here.
-
-        # Instead, compute rows later if direct blend config attached in params.
+        
         blend_cfg = params.get("_blend_cfg")
         if blend_cfg is None:
             future_probs = future_meta_probs

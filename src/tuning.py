@@ -1,4 +1,5 @@
 import numpy as np
+import optuna
 from sklearn.metrics import log_loss
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
@@ -9,6 +10,8 @@ from src.poisson_model import fit_team_strengths, fit_team_strengths_weighted, m
 from src.elo import compute_elo_ratings
 from src.calibration import fit_temperature, temperature_scale_probs
 
+# Απενεργοποίηση των περιττών logs του Optuna για καθαρό τερματικό
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 def make_mlp_pipeline(best_mlp_cfg):
     return make_pipeline(
@@ -28,14 +31,12 @@ def make_mlp_pipeline(best_mlp_cfg):
         )
     )
 
-
 def probs_from_meta_features(X_meta, start_idx):
     logits = X_meta[:, start_idx:start_idx + 3]
     probs = 1.0 / (1.0 + np.exp(-logits))
     row_sums = probs.sum(axis=1, keepdims=True)
     row_sums[row_sums == 0] = 1.0
     return probs / row_sums
-
 
 def blend_probabilities(weight_dict, probs_dict):
     out = np.zeros_like(probs_dict["base"], dtype=float)
@@ -52,7 +53,6 @@ def blend_probabilities(weight_dict, probs_dict):
     row_sums[row_sums == 0] = 1.0
     return out / row_sums
 
-
 def apply_blend(probs_xgb, probs_mlp, probs_market, probs_base, blend_cfg):
     return blend_probabilities(
         blend_cfg["weights"],
@@ -63,7 +63,6 @@ def apply_blend(probs_xgb, probs_mlp, probs_market, probs_base, blend_cfg):
             "mlp": probs_mlp,
         },
     )
-
 
 def tune_league_params(train_fit, val, full_played_df, streaming_block_probs_home_away, apply_elo_to_lambdas):
     Ks = [40, 50, 60, 70]
@@ -154,58 +153,83 @@ def tune_league_params(train_fit, val, full_played_df, streaming_block_probs_hom
     print(f"Best rho={best_rho}, T={best_T}")
     return {"K": int(best_K), "ha": int(best_ha), "beta": float(best_beta), "decay": float(best_decay), "rho": float(best_rho), "T": float(best_T)}
 
+def tune_xgb_hyperparams(X_early, y_early, X_late, y_late, n_trials=20):
+    print("Tuning XGBoost Hyperparameters using Optuna (Bayesian Optimization). Please wait...")
+    
+    def objective(trial):
+        lr = trial.suggest_float("learning_rate", 0.005, 0.2, log=True)
+        md = trial.suggest_int("max_depth", 2, 6)
+        ne = trial.suggest_int("n_estimators", 50, 600)
+        
+        meta = XGBClassifier(
+            n_estimators=ne, learning_rate=lr, max_depth=md,
+            objective="multi:softprob", eval_metric="mlogloss",
+            random_state=42, n_jobs=-1,
+        )
+        meta.fit(X_early, y_early)
+        late_probs = meta.predict_proba(X_late)
+        return log_loss(y_late, late_probs)
+        
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=n_trials)
+    
+    return {
+        "learning_rate": float(study.best_params["learning_rate"]),
+        "max_depth": int(study.best_params["max_depth"]),
+        "n_estimators": int(study.best_params["n_estimators"]),
+        "late_val_logloss": float(study.best_value)
+    }
 
-def tune_xgb_hyperparams(X_early, y_early, X_late, y_late):
-    learning_rates = [0.01, 0.05, 0.1]
-    max_depths = [3, 4, 5]
-    n_estimators_list = [100, 300, 500]
-    best_meta = None
-    print("Tuning XGBoost Hyperparameters on Validation Set. Please wait...")
-    for lr in learning_rates:
-        for md in max_depths:
-            for ne in n_estimators_list:
-                meta = XGBClassifier(
-                    n_estimators=ne, learning_rate=lr, max_depth=md,
-                    objective="multi:softprob", eval_metric="mlogloss",
-                    random_state=42, n_jobs=-1,
-                )
-                meta.fit(X_early, y_early)
-                late_probs = meta.predict_proba(X_late)
-                late_ll = log_loss(y_late, late_probs)
-                if best_meta is None or late_ll < best_meta[0]:
-                    best_meta = (late_ll, lr, md, ne)
-    best_late_ll, best_lr, best_md, best_ne = best_meta
-    return {"learning_rate": float(best_lr), "max_depth": int(best_md), "n_estimators": int(best_ne), "late_val_logloss": float(best_late_ll)}
-
-
-def tune_mlp_hyperparams(X_early, y_early, X_late, y_late):
-    mlp_grid = [
-        {"hidden_layer_sizes": (32,), "alpha": 1e-4, "learning_rate_init": 1e-3},
-        {"hidden_layer_sizes": (64,), "alpha": 1e-4, "learning_rate_init": 1e-3},
-        {"hidden_layer_sizes": (64, 32), "alpha": 1e-4, "learning_rate_init": 1e-3},
-        {"hidden_layer_sizes": (128, 64), "alpha": 1e-4, "learning_rate_init": 1e-3},
-        {"hidden_layer_sizes": (64, 32), "alpha": 1e-3, "learning_rate_init": 5e-4},
-        {"hidden_layer_sizes": (128, 64), "alpha": 1e-3, "learning_rate_init": 5e-4},
-    ]
-    best = None
-    print("Tuning MLP Hyperparameters on Validation Set. Please wait...")
-    for cfg in mlp_grid:
+def tune_mlp_hyperparams(X_early, y_early, X_late, y_late, n_trials=15):
+    print("Tuning MLP Hyperparameters using Optuna. Please wait...")
+    
+    def objective(trial):
+        n_layers = trial.suggest_int("n_layers", 1, 2)
+        layers = []
+        for i in range(n_layers):
+            layers.append(trial.suggest_categorical(f"n_units_l{i}", [32, 64, 128]))
+        
+        alpha = trial.suggest_float("alpha", 1e-5, 1e-2, log=True)
+        lr_init = trial.suggest_float("learning_rate_init", 1e-4, 5e-3, log=True)
+        
+        cfg = {
+            "hidden_layer_sizes": tuple(layers),
+            "alpha": alpha,
+            "learning_rate_init": lr_init
+        }
+        
         model = make_mlp_pipeline(cfg)
         model.fit(X_early, y_early)
         late_probs_raw = model.predict_proba(X_late)
+        
         T_mlp = fit_temperature(late_probs_raw, y_late)
         late_probs_cal = temperature_scale_probs(late_probs_raw, T_mlp)
-        late_ll = log_loss(y_late, late_probs_cal)
-        if best is None or late_ll < best["late_val_logloss"]:
-            best = {
-                "hidden_layer_sizes": list(cfg["hidden_layer_sizes"]),
-                "alpha": float(cfg["alpha"]),
-                "learning_rate_init": float(cfg["learning_rate_init"]),
-                "late_val_logloss": float(late_ll),
-                "temperature": float(T_mlp),
-            }
-    return best
-
+        
+        return log_loss(y_late, late_probs_cal)
+        
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=n_trials)
+    
+    best_layers = [study.best_params[f"n_units_l{i}"] for i in range(study.best_params["n_layers"])]
+    best_cfg = {
+        "hidden_layer_sizes": tuple(best_layers),
+        "alpha": study.best_params["alpha"],
+        "learning_rate_init": study.best_params["learning_rate_init"]
+    }
+    
+    # Επανεκπαίδευση με τις καλύτερες παραμέτρους για να βρούμε την τελική θερμοκρασία (Temperature)
+    best_model = make_mlp_pipeline(best_cfg)
+    best_model.fit(X_early, y_early)
+    best_probs_raw = best_model.predict_proba(X_late)
+    best_T = fit_temperature(best_probs_raw, y_late)
+    
+    return {
+        "hidden_layer_sizes": best_layers,
+        "alpha": float(best_cfg["alpha"]),
+        "learning_rate_init": float(best_cfg["learning_rate_init"]),
+        "late_val_logloss": float(study.best_value),
+        "temperature": float(best_T)
+    }
 
 def tune_blend_weights(y_late, probs_base, probs_market, probs_xgb, probs_mlp, step=0.1):
     weight_grid = np.arange(0.0, 1.0 + 1e-9, step)

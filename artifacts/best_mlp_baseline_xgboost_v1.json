@@ -1,10 +1,9 @@
 {
   "hidden_layer_sizes": [
-    64,
-    32
+    64
   ],
-  "alpha": 0.0001,
-  "learning_rate_init": 0.001,
-  "late_val_logloss": 0.962069626565961,
-  "temperature": 1.6883682566304696
+  "alpha": 4.511782052901552e-05,
+  "learning_rate_init": 0.0041596126652569945,
+  "late_val_logloss": 0.9680717626670285,
+  "temperature": 2.062094176721268
 }
