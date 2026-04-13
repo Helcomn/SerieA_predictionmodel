@@ -77,19 +77,11 @@
   "mlp_n_features": 13,
   "blend": {
     "weights": {
-      "base": 0.2,
-      "market": 0.8500000000000001,
+      "base": 0.1,
+      "market": 0.55,
       "xgb": 0.0,
-      "mlp": 0.45
+      "mlp": 0.0
     },
-    "late_val_logloss": 0.9589236664605892
-  },
-  "selection_summary": {
-    "winner_by_logloss": "market",
-    "winner_by_logloss_value": 0.97051,
-    "winner_by_betting_roi": "mlp",
-    "winner_by_betting_roi_value": 0.596,
-    "recommended_probability_model": "market",
-    "recommended_betting_model": "mlp"
+    "late_val_logloss": 0.9604293942820236
   }
 }
