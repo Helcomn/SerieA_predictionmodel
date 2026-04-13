@@ -10,7 +10,7 @@ from src.artifact_store import load_json_if_exists, load_pickle_if_exists
 from src.calibration import temperature_scale_probs
 from src.config import DEFAULT_CONFIG, ExperimentConfig
 from src.data_loader import load_league_data
-from src.feature_builder import build_single_feature_vector, market_probs_from_odds_row
+from src.feature_builder import MLP_DEFAULT_COLS, build_single_feature_vector, market_probs_from_odds_row
 from src.models.meta import blend_probabilities
 from src.poisson_model import top_k_scorelines_dc
 from src.state_builder import build_league_state, compute_match_components
@@ -55,10 +55,14 @@ def predict_custom_match(home, away, odds_h, odds_d, odds_a, state, meta_model, 
         lam_a=comp["lam_away"],
         mom_h=comp["mom_home"],
         mom_a=comp["mom_away"],
+        rest_h=comp["rest_home"],
+        rest_a=comp["rest_away"],
+        form_h=comp["form_home"],
+        form_a=comp["form_away"],
     )
     meta_probs = meta_model.predict_proba(X)[0]
     if mlp_model is not None:
-        mlp_probs_raw = mlp_model.predict_proba(X)
+        mlp_probs_raw = mlp_model.predict_proba(X[:, MLP_DEFAULT_COLS])
         if mlp_meta is not None and "temperature" in mlp_meta:
             mlp_probs = temperature_scale_probs(mlp_probs_raw, float(mlp_meta["temperature"]))[0]
         else:

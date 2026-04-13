@@ -5,16 +5,25 @@ import pandas as pd
 
 from src.calibration import temperature_scale_probs
 from src.data_loader import load_league_data
-from src.feature_builder import build_meta_features, market_probs_from_odds_row, ensure_market_probs
+from src.feature_builder import MLP_DEFAULT_COLS, build_meta_features, market_probs_from_odds_row, ensure_market_probs
 from src.fixtures import get_current_or_next_matchday_fixtures
 from src.models.meta import blend_probabilities
 from src.poisson_model import top_k_scorelines_dc
 from src.state_builder import build_league_state, compute_match_components
 
 
-def generate_upcoming_matchday_picks(leagues, league_best_params, meta_model, mlp_model, mlp_cfg, max_window_days=4):
+def generate_upcoming_matchday_picks(
+    leagues,
+    league_best_params,
+    meta_model,
+    mlp_model,
+    mlp_cfg,
+    *,
+    max_window_days=4,
+    pick_model="ensemble",
+):
     print("\n" + "=" * 70)
-    print("=== CURRENT / NEXT MATCHDAY PICKS (ENSEMBLE) ===")
+    print(f"=== CURRENT / NEXT MATCHDAY PICKS ({pick_model.upper()}) ===")
     print("=" * 70)
 
     upcoming_rows = []
@@ -36,7 +45,7 @@ def generate_upcoming_matchday_picks(leagues, league_best_params, meta_model, ml
 
         model_raw, market, aux, lambdas = [], [], [], []
         for _, row in fixtures.iterrows():
-            comp = compute_match_components(row["home_team"], row["away_team"], state)
+            comp = compute_match_components(row["home_team"], row["away_team"], state, match_date=row["date"])
             model_raw.append(comp["probs"].tolist())
             market.append(market_probs_from_odds_row(row["odds_home"], row["odds_draw"], row["odds_away"]).tolist())
             aux.append(comp["aux"].tolist())
@@ -52,14 +61,14 @@ def generate_upcoming_matchday_picks(leagues, league_best_params, meta_model, ml
 
         X_future = build_meta_features(model_probs, market_fixed, aux)
         future_meta_probs = meta_model.predict_proba(X_future)
-        future_mlp_probs_raw = mlp_model.predict_proba(X_future)
+        future_mlp_probs_raw = mlp_model.predict_proba(X_future[:, MLP_DEFAULT_COLS])
         future_mlp_probs = temperature_scale_probs(future_mlp_probs_raw, float(mlp_cfg["temperature"]))
 
         blend_cfg = params.get("_blend_cfg")
         if blend_cfg is None:
-            future_probs = future_meta_probs
+            future_ensemble_probs = future_meta_probs
         else:
-            future_probs = blend_probabilities(
+            future_ensemble_probs = blend_probabilities(
                 blend_cfg["weights"],
                 {
                     "base": model_probs,
@@ -68,6 +77,14 @@ def generate_upcoming_matchday_picks(leagues, league_best_params, meta_model, ml
                     "mlp": future_mlp_probs,
                 },
             )
+        candidate_probs = {
+            "base": model_probs,
+            "market": market_fixed,
+            "meta": future_meta_probs,
+            "mlp": future_mlp_probs,
+            "ensemble": future_ensemble_probs,
+        }
+        future_probs = candidate_probs.get(pick_model, future_ensemble_probs)
         for i, (_, row) in enumerate(fixtures.iterrows()):
             if not np.isfinite(future_probs[i]).all():
                 future_probs[i] = future_meta_probs[i]

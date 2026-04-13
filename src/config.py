@@ -7,7 +7,7 @@ from typing import Dict, List
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    experiment_name: str = "baseline_xgboost_v1"
+    experiment_name: str = "baseline_xgboost_v3_formpoints"
     artifacts_dir: Path = Path("artifacts")
     train_cut: str = "2024-07-01"
     test_cut: str = "2025-07-01"
@@ -21,6 +21,8 @@ class ExperimentConfig:
     force_retune_blend: bool = False
     random_state: int = 42
     max_upcoming_window_days: int = 4
+    detailed_betting_log: bool = False
+    print_verbose_audits: bool = False
 
     @property
     def params_file(self) -> Path:
@@ -49,6 +51,14 @@ class ExperimentConfig:
     @property
     def manifest_file(self) -> Path:
         return self.artifacts_dir / f"manifest_{self.experiment_name}.json"
+
+    @property
+    def results_csv_file(self) -> Path:
+        return self.artifacts_dir / "experiment_results.csv"
+
+    @property
+    def ablations_csv_file(self) -> Path:
+        return self.artifacts_dir / "feature_ablations.csv"
 
     def as_manifest(self) -> Dict:
         data = asdict(self)

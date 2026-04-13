@@ -1,136 +1,143 @@
-# Football Match Prediction & Value Betting Meta-Model
+# Football Match Prediction and Value Betting Meta-Model
 
-A machine learning system for predicting football match outcomes across the top 5 European leagues (England, Spain, Italy, Germany, France). The system combines classical statistical models (Elo Ratings, Poisson Distribution with Dixon-Coles correction) with modern ensemble learning and a deep-learning baseline to estimate true match probabilities and identify value bets against bookmaker odds.
+Machine learning system for predicting football match outcomes across the top 5 European leagues: England, Spain, Italy, Germany, and France. The pipeline combines Elo ratings, a Poisson goal model with Dixon-Coles adjustment, market odds, and stacked meta-models to estimate match probabilities and evaluate value betting strategies.
 
-> *Developed as part of a Diploma Thesis in Computer & Informatics Engineering.*
-
----
+Developed as part of a diploma thesis in Computer and Informatics Engineering.
 
 ## Features
 
-* **Automated Data Pipeline:** Downloads and syncs historical match data and upcoming fixture files automatically.
-* **Elo Rating System:** Dynamic team strength ratings updated after every match, with configurable home advantage, goal-margin multipliers, and dynamic rating initialization for newly promoted teams.
-* **Form / Momentum Tracking:** Calculates short-term performance trends (momentum) over a sliding window of recent matches to capture team form.
-* **Poisson Goal Model:** Per-team attack/defense strength estimation with exponential time-decay weighting and Dixon-Coles low-score correction.
-* **Bayesian Hyperparameter Optimization:** Automated tuning of XGBoost and MLP models using Optuna for efficient exploration of the parameter space.
-* **XGBoost Meta-Model:** Learns non-linear patterns from Poisson+Elo probabilities, market odds, and auxiliary features (e.g., Elo diff, xG, momentum).
-* **MLP Deep Learning Baseline:** A neural-network classifier trained on the same meta-feature space and calibrated separately.
-* **Ensemble Blender:** Final weighted ensemble combining Base Model, Market, XGBoost and MLP outputs.
-* **Temperature Scaling Calibration:** Post-hoc probability calibration using logit-space temperature scaling.
-* **Walk-Forward Backtesting:** Strictly temporal train/validation/test splits with no data leakage.
-* **Value Betting Simulation:** ROI, Net Profit and Hit Rate breakdown by market segment.
-* **Per-League Metrics:** LogLoss, Brier Score and ECE reported individually for each league after evaluation.
-* **Upcoming Matchday Picks:** Predicts only the current / next available league matchday from the fixture files while preventing leakage from already-played matches.
+- Historical and fixture data sync from external CSV sources
+- Dynamic Elo ratings with home advantage, goal-margin updates, and promoted-team initialization
+- Recency-weighted Poisson team strengths with Dixon-Coles low-score correction
+- Meta-features built from model probabilities, market probabilities, Elo differences, expected goals, and momentum
+- XGBoost meta-model plus MLP baseline
+- Probability calibration with temperature scaling
+- Ensemble blending across base model, market, XGBoost, and MLP outputs
+- Fixed temporal train / validation / test split with per-league chronological processing
+- Evaluation with log loss, Brier score, ECE, accuracy, betting simulation, and audit reports
+- Upcoming matchday predictions from dedicated fixture files
+
+## Repository Structure
+
+- `main.py`: training and evaluation pipeline entry point
+- `predict_match.py`: interactive custom match predictor entry point
+- `src/trainer.py`: end-to-end pipeline orchestration
+- `src/predictor.py`: runtime predictor utilities
+- `src/services/upcoming.py`: upcoming matchday predictions
 
 ## Installation
+
 Requires Python 3.9+.
-## Windows
-### 1. Clone the repository
-```cmd
-git clone https://github.com/Dimprassos/SerieA_predictionmodel.git
-```
-### 2. Run the setup script
+
+### Windows
+
+1. Clone the repository.
+2. Run:
+
 ```powershell
 .\setup.ps1
 ```
-### 3. Activate the virtual environment
-```cmd
-venv\Scripts\activate
+
+3. Activate the environment:
+
+```powershell
+.\venv\Scripts\activate
 ```
----
-## Linux / macOS / other Unix-like environments
-## 1. Clone the repository
-```bash
-git clone https://github.com/Dimprassos/SerieA_predictionmodel.git
-```
-## 2. Make the setup script executable
+
+### Linux / macOS
+
+1. Clone the repository.
+2. Make the setup script executable.
+3. Run:
+
 ```bash
 chmod +x setup.sh
-```
-## 3. Run the setup script
-```bash
 ./setup.sh
 ```
-## 4. Activate the virtual environment
+
+4. Activate the environment:
+
 ```bash
 source venv/bin/activate
 ```
----
-### Usage
-## Step 1 — Update Data
-Download the latest historical results and upcoming fixtures before running the model:
+
+## Usage
+
+### 1. Update Data
+
+Download the latest historical results and future fixtures:
+
 ```bash
 python src/update_data.py
 ```
-## Step 2 — Run the Main Pipeline
-Runs tuning/loading, training/loading, evaluation, betting simulation and upcoming matchday predictions:
+
+### 2. Run the Main Pipeline
+
+Runs tuning or artifact loading, model fitting or loading, evaluation, betting simulation, and upcoming matchday picks:
+
 ```bash
 python main.py
 ```
-## Step 3 — Predict a Custom Match
-Run from the project root:
-```bash
-python -m src.predict_match
-```
-At the end of execution the system prints:
-Aggregate evaluation metrics
-Per-league evaluation metrics
-Value betting simulation results
-Upcoming matchday picks for all supported leagues
 
+### 3. Predict a Custom Match
+
+Run the root entry point from the project root:
+
+```bash
+python predict_match.py
+```
 
 ## Methodology Overview
+
 ```text
-Raw Data
-   │
-   ├─► Elo Ratings
-   │
-   ├─► Poisson Team Strengths (time-weighted)
-   │        │
-   │        └─► Expected Goals (λ_home, λ_away)
-   │                    │
-   │                    └─► Dixon-Coles Scoreline Probabilities
-   │
-   ├─► Market Odds Probabilities
-   │
-   ├─► Team Momentum & Form History
-   │
-   └─► Meta Features
-            │
-            ├─► XGBoost Meta-Model
-            ├─► MLP Meta-Model
-            └─► Ensemble Blender
-                    │
-            Final Match Probabilities
-                    │
-          Value Bet Detection / Matchday Picks
+Raw match data
+  -> Elo ratings
+  -> Recency-weighted Poisson team strengths
+  -> Dixon-Coles outcome probabilities
+  -> Market implied probabilities
+  -> Auxiliary features: Elo diff, xG, momentum
+  -> Meta-features
+  -> XGBoost / MLP / blended ensemble
+  -> Final probabilities
+  -> Betting simulation and upcoming picks
 ```
 
 ## Evaluation
 
-The system is evaluated on a held-out test set using:
-Log Loss (NLL) — Main metric for probability quality. Lower is better.
-Brier Score — Mean squared probability error. Lower is better.
-ECE (Expected Calibration Error) — Measures calibration quality. Lower is better.
-Accuracy — Useful as a secondary classification metric, but not the primary model-selection criterion.
-Because this is a probabilistic prediction system, LogLoss, Brier and ECE are more important than plain accuracy.
+The main reported metrics are:
 
-Data Sources
-Historical match results & odds: football-data.co.uk
-Future fixtures: fixturedownload.com
----
-Notes
-Upcoming fixtures are read from dedicated fixture files, not inferred from historical result files alone.
-The system predicts only the current / next available matchday window to avoid jumping too far into the future.
-For custom match prediction, always run `predict_match.py` as a module from the project root:
-```bash
-  python -m src.predict_match
-  ```
----
-Thesis Context
-This project is part of a diploma thesis on football match outcome prediction using:
-classical statistical modelling,
-machine learning meta-models,
-ensemble methods,
-and deep learning baselines.
-The project has evolved from a single-file prototype into a more modular architecture to improve maintainability, experimentation and reproducibility.
+- Log loss
+- Multiclass Brier score
+- Expected calibration error
+- Accuracy
+
+The training pipeline uses:
+
+- a fixed date-based split defined in `src/config.py`
+- league-level parameter tuning on the validation period
+- early / late validation sub-splits for meta-model and blend tuning
+
+Betting evaluation is a simulation, not a claim of deployable profitability. The current implementation uses:
+
+- edge threshold `0.05`
+- fractional Kelly staking with `kelly_fraction=0.25`
+- max stake cap `0.05`
+- filters for extreme odds and extreme theoretical EV
+
+Reported betting outputs include bet count, hit rate, profit, ROI, average odds, and additional audit tables.
+
+## Data Sources
+
+- Historical match results and bookmaker odds: `football-data.co.uk`
+- Future fixtures: `fixturedownload.com`
+
+## Notes
+
+- Upcoming fixtures come from dedicated fixture CSV files.
+- Upcoming picks are limited to the current or next available matchday window.
+- Hyperparameter tuning uses Optuna when available; otherwise the active code falls back to a smaller manual search.
+- The README describes the active refactored path, not older duplicate modules that may have existed during development.
+
+## Thesis Context
+
+This repository evolved from an earlier narrower prototype into a modular top-5-leagues project. The current active code path is the refactored one described above.

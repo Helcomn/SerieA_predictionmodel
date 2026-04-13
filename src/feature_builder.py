@@ -8,7 +8,19 @@ FEATURE_COLUMNS = [
     "model_logit_home", "model_logit_draw", "model_logit_away",
     "market_logit_home", "market_logit_draw", "market_logit_away",
     "elo_diff", "total_xg", "xg_diff", "mom_home", "mom_away", "mom_diff",
+    "rest_home", "rest_away", "rest_diff",
+    "form_home", "form_away", "form_diff",
 ]
+
+MLP_DEFAULT_FEATURE_COLUMNS = [
+    "model_logit_home", "model_logit_draw", "model_logit_away",
+    "market_logit_home", "market_logit_draw", "market_logit_away",
+    "elo_diff",
+    "mom_home", "mom_away", "mom_diff",
+    "form_home", "form_away", "form_diff",
+]
+MLP_DEFAULT_COLS = [FEATURE_COLUMNS.index(col) for col in MLP_DEFAULT_FEATURE_COLUMNS]
+MLP_NO_REST_COLS = [i for i, col in enumerate(FEATURE_COLUMNS) if not col.startswith("rest_")]
 
 
 def market_probs_from_odds_row(odds_h, odds_d, odds_a):
@@ -55,9 +67,24 @@ def build_meta_features(model_probs: np.ndarray, market_probs: np.ndarray, aux: 
     return np.array(X, dtype=float)
 
 
-def build_single_feature_vector(model_probs, market_probs, *, elo_h, elo_a, lam_h, lam_a, mom_h, mom_a):
+def build_single_feature_vector(model_probs, market_probs, *, elo_h, elo_a, lam_h, lam_a, mom_h, mom_a, rest_h, rest_a, form_h, form_a):
     mom_diff = mom_h - mom_a
-    aux = np.array([[(elo_h - elo_a) / 400.0, lam_h + lam_a, lam_h - lam_a, mom_h, mom_a, mom_diff]], dtype=float)
+    rest_diff = rest_h - rest_a
+    form_diff = form_h - form_a
+    aux = np.array([[
+        (elo_h - elo_a) / 400.0,
+        lam_h + lam_a,
+        lam_h - lam_a,
+        mom_h,
+        mom_a,
+        mom_diff,
+        rest_h,
+        rest_a,
+        rest_diff,
+        form_h,
+        form_a,
+        form_diff,
+    ]], dtype=float)
     return build_meta_features(np.asarray([model_probs], dtype=float), np.asarray([market_probs], dtype=float), aux)
 
 
