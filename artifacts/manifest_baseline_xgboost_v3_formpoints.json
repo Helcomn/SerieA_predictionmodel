@@ -83,5 +83,13 @@
       "mlp": 0.0
     },
     "late_val_logloss": 0.9604293942820236
+  },
+  "selection_summary": {
+    "winner_by_logloss": "market",
+    "winner_by_logloss_value": 0.97051,
+    "winner_by_betting_roi": "mlp",
+    "winner_by_betting_roi_value": 0.596,
+    "recommended_probability_model": "market",
+    "recommended_betting_model": "mlp"
   }
 }
