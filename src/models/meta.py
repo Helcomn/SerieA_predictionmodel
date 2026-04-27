@@ -6,6 +6,7 @@ try:
 except ImportError:  # fallback for environments without optuna
     optuna = None
 from sklearn.metrics import log_loss
+from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -111,6 +112,59 @@ def fit_xgb_model(X_train, y_train, cfg):
     return model
 
 
+def make_logreg_pipeline(C: float = 1.0):
+    return make_pipeline(
+        StandardScaler(),
+        LogisticRegression(
+            C=float(C),
+            solver="lbfgs",
+            max_iter=2000,
+            random_state=42,
+        ),
+    )
+
+
+def tune_logreg_hyperparams(X_early, y_early, X_late, y_late):
+    print("Tuning Logistic Regression baseline...")
+    best = None
+    for C in [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0]:
+        model = make_logreg_pipeline(C)
+        model.fit(X_early, y_early)
+        late_probs_raw = model.predict_proba(X_late)
+        T = fit_temperature(late_probs_raw, y_late)
+        late_probs = temperature_scale_probs(late_probs_raw, T)
+        ll = log_loss(y_late, late_probs)
+        if best is None or ll < best["late_val_logloss"]:
+            best = {"C": float(C), "temperature": float(T), "late_val_logloss": float(ll)}
+    return best
+
+
+def tune_feature_subset(model_factory, X_early, y_early, X_late, y_late, candidate_feature_sets, *, temperature_scale=False):
+    best = None
+    rows = []
+    for name, cols in candidate_feature_sets.items():
+        model = model_factory()
+        model.fit(X_early[:, cols], y_early)
+        late_probs_raw = model.predict_proba(X_late[:, cols])
+        if temperature_scale:
+            T = fit_temperature(late_probs_raw, y_late)
+            late_probs = temperature_scale_probs(late_probs_raw, T)
+        else:
+            T = 1.0
+            late_probs = late_probs_raw
+        ll = log_loss(y_late, late_probs)
+        row = {
+            "name": name,
+            "cols": list(cols),
+            "late_val_logloss": float(ll),
+            "temperature": float(T),
+        }
+        rows.append(row)
+        if best is None or ll < best["late_val_logloss"]:
+            best = row
+    return best, rows
+
+
 def tune_mlp_hyperparams(X_early, y_early, X_late, y_late, n_trials=15):
     print("Tuning MLP Hyperparameters. Please wait...")
 
@@ -161,19 +215,61 @@ def tune_mlp_hyperparams(X_early, y_early, X_late, y_late, n_trials=15):
     return out
 
 
+def tune_mlp_feature_subset(X_early, y_early, X_late, y_late, base_cfg, candidate_feature_sets):
+    print("Selecting MLP feature subset on late validation...")
+    best = None
+    rows = []
+    for name, cols in candidate_feature_sets.items():
+        model = make_mlp_pipeline(base_cfg)
+        model.fit(X_early[:, cols], y_early)
+        late_probs_raw = model.predict_proba(X_late[:, cols])
+        T_mlp = fit_temperature(late_probs_raw, y_late)
+        late_probs = temperature_scale_probs(late_probs_raw, T_mlp)
+        ll = log_loss(y_late, late_probs)
+        row = {
+            "name": name,
+            "cols": list(cols),
+            "late_val_logloss": float(ll),
+            "temperature": float(T_mlp),
+        }
+        rows.append(row)
+        if best is None or ll < best["late_val_logloss"]:
+            best = row
+
+    print("\nMLP feature subset scores:")
+    for row in sorted(rows, key=lambda r: r["late_val_logloss"]):
+        print(f"  {row['name']:<22} {row['late_val_logloss']:.4f}")
+    return best, rows
+
+
 def tune_blend_weights(y_late, probs_base, probs_market, probs_xgb, probs_mlp, step=0.1):
     weight_grid = np.arange(0.0, 1.0 + 1e-9, step)
     best = None
     print("Tuning blend weights on late validation. Please wait...")
-    for wb in weight_grid:
-        for wm in weight_grid:
-            for wx in weight_grid:
-                for wn in weight_grid:
-                    if wb + wm + wx + wn == 0:
-                        continue
-                    weights = {"base": float(wb), "market": float(wm), "xgb": float(wx), "mlp": float(wn)}
-                    probs_blend = blend_probabilities(weights, {"base": probs_base, "market": probs_market, "xgb": probs_xgb, "mlp": probs_mlp})
-                    ll = log_loss(y_late, probs_blend)
-                    if best is None or ll < best["late_val_logloss"]:
-                        best = {"weights": weights, "late_val_logloss": float(ll)}
+    candidates = {
+        "base": probs_base,
+        "market": probs_market,
+        "xgb": probs_xgb,
+        "mlp": probs_mlp,
+    }
+    active_names = [name for name, probs in candidates.items() if probs is not None]
+
+    def search(idx, weights):
+        nonlocal best
+        if idx == len(active_names):
+            if sum(weights.values()) == 0:
+                return
+            full_weights = {name: float(weights.get(name, 0.0)) for name in candidates}
+            probs_blend = blend_probabilities(full_weights, candidates)
+            ll = log_loss(y_late, probs_blend)
+            if best is None or ll < best["late_val_logloss"]:
+                best = {"weights": full_weights, "late_val_logloss": float(ll)}
+            return
+
+        name = active_names[idx]
+        for w in weight_grid:
+            weights[name] = float(w)
+            search(idx + 1, weights)
+
+    search(0, {})
     return best

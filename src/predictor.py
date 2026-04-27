@@ -10,10 +10,10 @@ from src.artifact_store import load_json_if_exists, load_pickle_if_exists
 from src.calibration import temperature_scale_probs
 from src.config import DEFAULT_CONFIG, ExperimentConfig
 from src.data_loader import load_league_data
-from src.feature_builder import MLP_DEFAULT_COLS, build_single_feature_vector, market_probs_from_odds_row
+from src.feature_builder import MLP_DEFAULT_COLS, build_single_feature_vector, feature_indices, market_probs_from_odds_row
 from src.models.meta import blend_probabilities
 from src.poisson_model import top_k_scorelines_dc
-from src.state_builder import build_league_state, compute_match_components
+from src.state_builder import build_league_state, compute_match_components, neutral_extra_features
 
 
 def load_runtime_artifacts(config: ExperimentConfig = DEFAULT_CONFIG):
@@ -25,10 +25,11 @@ def load_runtime_artifacts(config: ExperimentConfig = DEFAULT_CONFIG):
 
     meta_model = XGBClassifier()
     meta_model.load_model(str(config.model_file))
+    meta_cfg = load_json_if_exists(config.meta_file)
     mlp_model = load_pickle_if_exists(config.mlp_model_file)
     mlp_meta = load_json_if_exists(config.mlp_meta_file)
     blend_cfg = load_json_if_exists(config.blend_file)
-    return params, meta_model, mlp_model, mlp_meta, blend_cfg
+    return params, meta_model, meta_cfg, mlp_model, mlp_meta, blend_cfg
 
 
 def get_league_runtime_state(league_name: str, params: dict):
@@ -37,8 +38,9 @@ def get_league_runtime_state(league_name: str, params: dict):
     return build_league_state(df, params[league_name])
 
 
-def predict_custom_match(home, away, odds_h, odds_d, odds_a, state, meta_model, mlp_model, mlp_meta, blend_cfg):
-    comp = compute_match_components(home, away, state)
+def predict_custom_match(home, away, odds_h, odds_d, odds_a, state, meta_model, meta_cfg, mlp_model, mlp_meta, blend_cfg):
+    extra_aux = neutral_extra_features()
+    comp = compute_match_components(home, away, state, extra_aux=extra_aux)
     model_probs_raw = np.array([comp["probs"]], dtype=float)
     model_probs_cal = temperature_scale_probs(model_probs_raw, state.params["T"])[0]
     if odds_h > 1.0 and odds_d > 1.0 and odds_a > 1.0:
@@ -59,10 +61,13 @@ def predict_custom_match(home, away, odds_h, odds_d, odds_a, state, meta_model, 
         rest_a=comp["rest_away"],
         form_h=comp["form_home"],
         form_a=comp["form_away"],
+        extra_aux=extra_aux,
     )
-    meta_probs = meta_model.predict_proba(X)[0]
+    xgb_cols = feature_indices(meta_cfg.get("feature_columns", [])) if meta_cfg is not None and meta_cfg.get("feature_columns") else list(range(X.shape[1]))
+    meta_probs = meta_model.predict_proba(X[:, xgb_cols])[0]
     if mlp_model is not None:
-        mlp_probs_raw = mlp_model.predict_proba(X[:, MLP_DEFAULT_COLS])
+        mlp_cols = feature_indices(mlp_meta.get("feature_columns", [])) if mlp_meta is not None and mlp_meta.get("feature_columns") else MLP_DEFAULT_COLS
+        mlp_probs_raw = mlp_model.predict_proba(X[:, mlp_cols])
         if mlp_meta is not None and "temperature" in mlp_meta:
             mlp_probs = temperature_scale_probs(mlp_probs_raw, float(mlp_meta["temperature"]))[0]
         else:

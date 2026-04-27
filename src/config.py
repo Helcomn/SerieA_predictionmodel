@@ -60,6 +60,30 @@ class ExperimentConfig:
     def ablations_csv_file(self) -> Path:
         return self.artifacts_dir / "feature_ablations.csv"
 
+    @property
+    def final_model_summary_file(self) -> Path:
+        return self.artifacts_dir / f"final_model_summary_{self.experiment_name}.csv"
+
+    @property
+    def final_ablation_summary_file(self) -> Path:
+        return self.artifacts_dir / f"final_ablation_summary_{self.experiment_name}.csv"
+
+    @property
+    def final_betting_robustness_file(self) -> Path:
+        return self.artifacts_dir / f"final_betting_robustness_{self.experiment_name}.csv"
+
+    @property
+    def final_bet_curve_file(self) -> Path:
+        return self.artifacts_dir / f"final_bet_curve_{self.experiment_name}.csv"
+
+    @property
+    def final_league_model_selection_file(self) -> Path:
+        return self.artifacts_dir / f"final_league_model_selection_{self.experiment_name}.csv"
+
+    @property
+    def final_league_strategy_file(self) -> Path:
+        return self.artifacts_dir / f"final_league_strategy_{self.experiment_name}.csv"
+
     def as_manifest(self) -> Dict:
         data = asdict(self)
         data["artifacts_dir"] = str(self.artifacts_dir)
@@ -68,3 +92,4 @@ class ExperimentConfig:
 
 
 DEFAULT_CONFIG = ExperimentConfig()
+FINAL_CONFIG = ExperimentConfig(experiment_name="final_market_xg_comparison")

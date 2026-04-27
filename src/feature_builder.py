@@ -10,6 +10,15 @@ FEATURE_COLUMNS = [
     "elo_diff", "total_xg", "xg_diff", "mom_home", "mom_away", "mom_diff",
     "rest_home", "rest_away", "rest_diff",
     "form_home", "form_away", "form_diff",
+    "shots_for_home_5", "shots_for_away_5", "shots_for_diff_5",
+    "sot_for_home_5", "sot_for_away_5", "sot_for_diff_5",
+    "corners_for_home_5", "corners_for_away_5", "corners_for_diff_5",
+    "cards_home_5", "cards_away_5", "cards_diff_5",
+    "market_move_home", "market_move_draw", "market_move_away",
+    "ou25_over_prob", "ah_line",
+    "understat_xg_for_home_5", "understat_xg_for_away_5", "understat_xg_diff_5",
+    "understat_npxg_for_home_5", "understat_npxg_for_away_5", "understat_npxg_diff_5",
+    "understat_xpts_home_5", "understat_xpts_away_5", "understat_xpts_diff_5",
 ]
 
 MLP_DEFAULT_FEATURE_COLUMNS = [
@@ -19,7 +28,32 @@ MLP_DEFAULT_FEATURE_COLUMNS = [
     "mom_home", "mom_away", "mom_diff",
     "form_home", "form_away", "form_diff",
 ]
-MLP_DEFAULT_COLS = [FEATURE_COLUMNS.index(col) for col in MLP_DEFAULT_FEATURE_COLUMNS]
+LOCAL_STATS_FEATURE_COLUMNS = [
+    "shots_for_home_5", "shots_for_away_5", "shots_for_diff_5",
+    "sot_for_home_5", "sot_for_away_5", "sot_for_diff_5",
+    "corners_for_home_5", "corners_for_away_5", "corners_for_diff_5",
+    "cards_home_5", "cards_away_5", "cards_diff_5",
+]
+ODDS_MOVEMENT_FEATURE_COLUMNS = ["market_move_home", "market_move_draw", "market_move_away"]
+MARKET_CONTEXT_FEATURE_COLUMNS = ODDS_MOVEMENT_FEATURE_COLUMNS + ["ou25_over_prob", "ah_line"]
+UNDERSTAT_XG_FEATURE_COLUMNS = [
+    "understat_xg_for_home_5", "understat_xg_for_away_5", "understat_xg_diff_5",
+    "understat_npxg_for_home_5", "understat_npxg_for_away_5", "understat_npxg_diff_5",
+    "understat_xpts_home_5", "understat_xpts_away_5", "understat_xpts_diff_5",
+]
+BASE_NON_MARKET_FEATURE_COLUMNS = [
+    col for col in FEATURE_COLUMNS
+    if not col.startswith("market_logit_") and col not in MARKET_CONTEXT_FEATURE_COLUMNS
+]
+NEW_LOCAL_FEATURE_COLUMNS = LOCAL_STATS_FEATURE_COLUMNS + MARKET_CONTEXT_FEATURE_COLUMNS
+NEW_DATA_FEATURE_COLUMNS = NEW_LOCAL_FEATURE_COLUMNS + UNDERSTAT_XG_FEATURE_COLUMNS
+
+
+def feature_indices(feature_names: list[str] | tuple[str, ...]) -> list[int]:
+    return [FEATURE_COLUMNS.index(col) for col in feature_names]
+
+
+MLP_DEFAULT_COLS = feature_indices(MLP_DEFAULT_FEATURE_COLUMNS)
 MLP_NO_REST_COLS = [i for i, col in enumerate(FEATURE_COLUMNS) if not col.startswith("rest_")]
 
 
@@ -67,7 +101,22 @@ def build_meta_features(model_probs: np.ndarray, market_probs: np.ndarray, aux: 
     return np.array(X, dtype=float)
 
 
-def build_single_feature_vector(model_probs, market_probs, *, elo_h, elo_a, lam_h, lam_a, mom_h, mom_a, rest_h, rest_a, form_h, form_a):
+def build_single_feature_vector(
+    model_probs,
+    market_probs,
+    *,
+    elo_h,
+    elo_a,
+    lam_h,
+    lam_a,
+    mom_h,
+    mom_a,
+    rest_h,
+    rest_a,
+    form_h,
+    form_a,
+    extra_aux=None,
+):
     mom_diff = mom_h - mom_a
     rest_diff = rest_h - rest_a
     form_diff = form_h - form_a
@@ -85,6 +134,8 @@ def build_single_feature_vector(model_probs, market_probs, *, elo_h, elo_a, lam_
         form_a,
         form_diff,
     ]], dtype=float)
+    if extra_aux is not None:
+        aux = np.concatenate([aux, np.asarray(extra_aux, dtype=float).reshape(1, -1)], axis=1)
     return build_meta_features(np.asarray([model_probs], dtype=float), np.asarray([market_probs], dtype=float), aux)
 
 

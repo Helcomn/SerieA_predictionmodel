@@ -5,17 +5,18 @@ import pandas as pd
 
 from src.calibration import temperature_scale_probs
 from src.data_loader import load_league_data
-from src.feature_builder import MLP_DEFAULT_COLS, build_meta_features, market_probs_from_odds_row, ensure_market_probs
+from src.feature_builder import MLP_DEFAULT_COLS, build_meta_features, feature_indices, market_probs_from_odds_row, ensure_market_probs
 from src.fixtures import get_current_or_next_matchday_fixtures
 from src.models.meta import blend_probabilities
 from src.poisson_model import top_k_scorelines_dc
-from src.state_builder import build_league_state, compute_match_components
+from src.state_builder import build_league_state, compute_match_components, compute_pre_match_extra_features
 
 
 def generate_upcoming_matchday_picks(
     leagues,
     league_best_params,
     meta_model,
+    meta_cfg,
     mlp_model,
     mlp_cfg,
     *,
@@ -45,7 +46,9 @@ def generate_upcoming_matchday_picks(
 
         model_raw, market, aux, lambdas = [], [], [], []
         for _, row in fixtures.iterrows():
-            comp = compute_match_components(row["home_team"], row["away_team"], state, match_date=row["date"])
+            past_matches = played_df[played_df["date"] < row["date"]]
+            extra_aux = compute_pre_match_extra_features(row, past_matches)
+            comp = compute_match_components(row["home_team"], row["away_team"], state, match_date=row["date"], extra_aux=extra_aux)
             model_raw.append(comp["probs"].tolist())
             market.append(market_probs_from_odds_row(row["odds_home"], row["odds_draw"], row["odds_away"]).tolist())
             aux.append(comp["aux"].tolist())
@@ -60,8 +63,10 @@ def generate_upcoming_matchday_picks(
         market_fixed = ensure_market_probs(model_probs, market)
 
         X_future = build_meta_features(model_probs, market_fixed, aux)
-        future_meta_probs = meta_model.predict_proba(X_future)
-        future_mlp_probs_raw = mlp_model.predict_proba(X_future[:, MLP_DEFAULT_COLS])
+        xgb_cols = feature_indices(meta_cfg.get("feature_columns", [])) if meta_cfg is not None and meta_cfg.get("feature_columns") else list(range(X_future.shape[1]))
+        future_meta_probs = meta_model.predict_proba(X_future[:, xgb_cols])
+        mlp_cols = feature_indices(mlp_cfg.get("feature_columns", [])) if mlp_cfg is not None and mlp_cfg.get("feature_columns") else MLP_DEFAULT_COLS
+        future_mlp_probs_raw = mlp_model.predict_proba(X_future[:, mlp_cols])
         future_mlp_probs = temperature_scale_probs(future_mlp_probs_raw, float(mlp_cfg["temperature"]))
 
         blend_cfg = params.get("_blend_cfg")

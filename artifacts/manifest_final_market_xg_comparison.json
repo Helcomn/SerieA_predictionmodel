@@ -1,7 +1,7 @@
 {
   "pipeline_version": 7,
   "config": {
-    "experiment_name": "baseline_xgboost_v3_formpoints",
+    "experiment_name": "final_market_xg_comparison",
     "artifacts_dir": "artifacts",
     "train_cut": "2024-07-01",
     "test_cut": "2025-07-01",
@@ -72,10 +72,10 @@
   ],
   "n_features": 44,
   "xgb": {
-    "learning_rate": 0.030840878257401415,
+    "learning_rate": 0.014191912768199918,
     "max_depth": 2,
-    "n_estimators": 117,
-    "late_val_logloss": 0.9751384878044516,
+    "n_estimators": 211,
+    "late_val_logloss": 0.9760515520328692,
     "feature_set": "market_plus_understat_xg",
     "feature_columns": [
       "market_logit_home",
@@ -94,7 +94,7 @@
     "feature_subset_scores": [
       {
         "name": "all_features",
-        "late_val_logloss": 0.9789954868849486,
+        "late_val_logloss": 0.978226441525005,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -144,7 +144,7 @@
       },
       {
         "name": "core_18",
-        "late_val_logloss": 0.9799482879241248,
+        "late_val_logloss": 0.9788240284373699,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -168,7 +168,7 @@
       },
       {
         "name": "market_only",
-        "late_val_logloss": 0.9822543886779035,
+        "late_val_logloss": 0.980583718552835,
         "feature_columns": [
           "market_logit_home",
           "market_logit_draw",
@@ -177,7 +177,7 @@
       },
       {
         "name": "market_plus_context",
-        "late_val_logloss": 0.9825952462699584,
+        "late_val_logloss": 0.9796794635696812,
         "feature_columns": [
           "market_logit_home",
           "market_logit_draw",
@@ -191,7 +191,7 @@
       },
       {
         "name": "core_plus_odds",
-        "late_val_logloss": 0.9822327831109254,
+        "late_val_logloss": 0.9808327468483868,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -220,7 +220,7 @@
       },
       {
         "name": "core_plus_stats",
-        "late_val_logloss": 0.9797685901769484,
+        "late_val_logloss": 0.9788836331483138,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -256,7 +256,7 @@
       },
       {
         "name": "core_plus_new_local",
-        "late_val_logloss": 0.9799528872478963,
+        "late_val_logloss": 0.9795180494226658,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -297,7 +297,7 @@
       },
       {
         "name": "core_plus_understat_xg",
-        "late_val_logloss": 0.9792577792862295,
+        "late_val_logloss": 0.9786639266883994,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -330,7 +330,7 @@
       },
       {
         "name": "market_plus_understat_xg",
-        "late_val_logloss": 0.9751384878044516,
+        "late_val_logloss": 0.9760515520328692,
         "feature_columns": [
           "market_logit_home",
           "market_logit_draw",
@@ -348,7 +348,7 @@
       },
       {
         "name": "market_context_plus_understat_xg",
-        "late_val_logloss": 0.9770330332691094,
+        "late_val_logloss": 0.9770795681947182,
         "feature_columns": [
           "market_logit_home",
           "market_logit_draw",
@@ -371,7 +371,7 @@
       },
       {
         "name": "no_new_local_stats",
-        "late_val_logloss": 0.9811145016033145,
+        "late_val_logloss": 0.9795897942618341,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -409,7 +409,7 @@
       },
       {
         "name": "no_odds_context",
-        "late_val_logloss": 0.9781215144550063,
+        "late_val_logloss": 0.9777240985747275,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -454,7 +454,7 @@
       },
       {
         "name": "no_understat_xg",
-        "late_val_logloss": 0.9799528872478963,
+        "late_val_logloss": 0.9795180494226658,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -952,10 +952,10 @@
     "hidden_layer_sizes": [
       128
     ],
-    "alpha": 8.781437746379551e-05,
-    "learning_rate_init": 0.00022686726853152604,
-    "late_val_logloss": 0.9708337185276875,
-    "temperature": 1.9510404351065946,
+    "alpha": 0.0010627384064008046,
+    "learning_rate_init": 0.00015318121409267906,
+    "late_val_logloss": 0.9741203017856326,
+    "temperature": 1.7851478879394882,
     "feature_set": "default",
     "feature_columns": [
       "model_logit_home",
@@ -975,7 +975,7 @@
     "feature_subset_scores": [
       {
         "name": "default",
-        "late_val_logloss": 0.9708337185276875,
+        "late_val_logloss": 0.9741203017856326,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -994,7 +994,7 @@
       },
       {
         "name": "default_plus_odds_context",
-        "late_val_logloss": 1.0224085356823904,
+        "late_val_logloss": 1.005329584506275,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -1018,7 +1018,7 @@
       },
       {
         "name": "default_plus_rolling_stats",
-        "late_val_logloss": 1.0129758978369106,
+        "late_val_logloss": 1.0004972874860527,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -1049,7 +1049,7 @@
       },
       {
         "name": "default_plus_new_local",
-        "late_val_logloss": 1.0045004871699488,
+        "late_val_logloss": 0.9918616068099261,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -1085,7 +1085,7 @@
       },
       {
         "name": "default_plus_understat_xg",
-        "late_val_logloss": 0.9748386947097682,
+        "late_val_logloss": 1.0064155214561759,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -1113,7 +1113,7 @@
       },
       {
         "name": "core_18",
-        "late_val_logloss": 1.000009377390515,
+        "late_val_logloss": 1.0081996029775226,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -1137,7 +1137,7 @@
       },
       {
         "name": "core_plus_odds_context",
-        "late_val_logloss": 1.0129241877216268,
+        "late_val_logloss": 1.0102222941251124,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -1166,7 +1166,7 @@
       },
       {
         "name": "core_plus_rolling_stats",
-        "late_val_logloss": 0.9905611880250107,
+        "late_val_logloss": 0.9899696953061304,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -1202,7 +1202,7 @@
       },
       {
         "name": "core_plus_understat_xg",
-        "late_val_logloss": 0.9748007666854648,
+        "late_val_logloss": 0.9741581771626243,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -1235,7 +1235,7 @@
       },
       {
         "name": "all_features",
-        "late_val_logloss": 0.9866450895009821,
+        "late_val_logloss": 0.98557156663536,
         "feature_columns": [
           "model_logit_home",
           "model_logit_draw",
@@ -1311,7 +1311,7 @@
     "late_val_logloss": 0.9609650874977137,
     "mlp_allowed": false,
     "mlp_gate": {
-      "late_mlp_logloss": 0.9708337185276875,
+      "late_mlp_logloss": 0.9741203017856326,
       "late_market_logloss": 0.9609650874977137,
       "margin_required": 0.002
     }
@@ -1320,8 +1320,9 @@
     "winner_by_logloss": "market",
     "winner_by_logloss_value": 0.97051,
     "winner_by_betting_roi": "mlp",
-    "winner_by_betting_roi_value": 1.1763,
+    "winner_by_betting_roi_value": 2.0201,
     "recommended_probability_model": "market",
-    "recommended_betting_model": "mlp"
+    "recommended_betting_model": "market",
+    "recommended_betting_reason": "no_positive_roi_among_stable_candidates"
   }
 }

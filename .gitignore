@@ -12,3 +12,7 @@ venv/
 
 artifacts/*.tmp
 project_review.txt
+codex_response_log.txt
+model_explanation_local.txt
+data/external/*.csv
+data/external/*.parquet

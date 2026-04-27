@@ -30,7 +30,7 @@ def pick_team(teams, prompt):
 
 def main():
     print("=== Interactive Match Predictor ===")
-    params, meta_model, mlp_model, mlp_meta, blend_cfg = load_runtime_artifacts()
+    params, meta_model, meta_cfg, mlp_model, mlp_meta, blend_cfg = load_runtime_artifacts()
     leagues = ["england", "spain", "italy", "germany", "france"]
 
     while True:
@@ -71,7 +71,7 @@ def main():
                 print("Invalid odds format.")
                 continue
 
-            res = predict_custom_match(home_real, away_real, oh, od, oa, state, meta_model, mlp_model, mlp_meta, blend_cfg)
+            res = predict_custom_match(home_real, away_real, oh, od, oa, state, meta_model, meta_cfg, mlp_model, mlp_meta, blend_cfg)
             print("\n--- Prediction Summary ---")
             print(f"Match: {home_real} vs {away_real}")
             print(f"Elo: {res['elo'][0]:.1f} vs {res['elo'][1]:.1f}")

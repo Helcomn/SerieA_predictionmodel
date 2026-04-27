@@ -2,9 +2,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.understat_data import UNDERSTAT_VALUE_COLUMNS, add_understat_xg
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 CLOSING_COLS = ("PSCH", "PSCD", "PSCA")
+OPENING_AVG_COLS = ("AvgH", "AvgD", "AvgA")
+CLOSING_AVG_COLS = ("AvgCH", "AvgCD", "AvgCA")
+OVER_UNDER_COLS = (
+    ("AvgC>2.5", "AvgC<2.5"),
+    ("Avg>2.5", "Avg<2.5"),
+    ("B365C>2.5", "B365C<2.5"),
+    ("B365>2.5", "B365<2.5"),
+)
+AH_LINE_COLS = ("AHCh", "AHh")
+MATCH_STAT_COLS = ["HS", "AS", "HST", "AST", "HC", "AC", "HY", "AY", "HR", "AR", "HF", "AF"]
 
 BOOK_TRIPLES = [
     ("B365H", "B365D", "B365A"),
@@ -77,6 +89,50 @@ def _pick_best_or_avg_odds_row(row, available_cols):
     return _fair_probs_to_odds(p_avg)
 
 
+def _pick_triplet(row, available_cols, preferred_cols, fallback_book_triples=()):
+    if all(c in available_cols for c in preferred_cols):
+        oh = pd.to_numeric(row.get(preferred_cols[0]), errors="coerce")
+        od = pd.to_numeric(row.get(preferred_cols[1]), errors="coerce")
+        oa = pd.to_numeric(row.get(preferred_cols[2]), errors="coerce")
+        if _valid_odds_triplet(oh, od, oa):
+            return float(oh), float(od), float(oa)
+
+    probs_list = []
+    for h, d, a in fallback_book_triples:
+        if h in available_cols and d in available_cols and a in available_cols:
+            oh = pd.to_numeric(row.get(h), errors="coerce")
+            od = pd.to_numeric(row.get(d), errors="coerce")
+            oa = pd.to_numeric(row.get(a), errors="coerce")
+            if _valid_odds_triplet(oh, od, oa):
+                probs_list.append(_odds_to_fair_probs(float(oh), float(od), float(oa)))
+
+    if not probs_list:
+        return (np.nan, np.nan, np.nan)
+    return _fair_probs_to_odds(np.nanmean(np.vstack(probs_list), axis=0))
+
+
+def _pick_over_under_25(row, available_cols):
+    for over_col, under_col in OVER_UNDER_COLS:
+        if over_col in available_cols and under_col in available_cols:
+            over = pd.to_numeric(row.get(over_col), errors="coerce")
+            under = pd.to_numeric(row.get(under_col), errors="coerce")
+            if np.isfinite(over) and np.isfinite(under) and over > 1.0001 and under > 1.0001:
+                inv = np.array([1.0 / over, 1.0 / under], dtype=float)
+                inv_sum = inv.sum()
+                if inv_sum > 0:
+                    return float(inv[0] / inv_sum)
+    return np.nan
+
+
+def _pick_ah_line(row, available_cols):
+    for col in AH_LINE_COLS:
+        if col in available_cols:
+            value = pd.to_numeric(row.get(col), errors="coerce")
+            if np.isfinite(value):
+                return float(value)
+    return np.nan
+
+
 def load_league_data(league_name):
     data_path = PROJECT_ROOT / "data" / "raw" / league_name
     files = list(data_path.glob("*.csv"))
@@ -101,7 +157,11 @@ def load_league_data(league_name):
 
         want_cols = set(REQUIRED_BASE)
 
-        for c in CLOSING_COLS:
+        optional_cols = set(MATCH_STAT_COLS) | set(OPENING_AVG_COLS) | set(CLOSING_AVG_COLS) | set(CLOSING_COLS) | set(AH_LINE_COLS)
+        for over_col, under_col in OVER_UNDER_COLS:
+            optional_cols.update([over_col, under_col])
+
+        for c in optional_cols:
             if c in df.columns:
                 want_cols.add(c)
 
@@ -146,11 +206,60 @@ def load_league_data(league_name):
         )
         odds.columns = ["odds_home", "odds_draw", "odds_away"]
 
-        df = pd.concat([df, odds], axis=1)
+        opening_odds = df.apply(
+            lambda r: _pick_triplet(r, available_cols, OPENING_AVG_COLS, BOOK_TRIPLES),
+            axis=1,
+            result_type="expand",
+        )
+        opening_odds.columns = ["open_odds_home", "open_odds_draw", "open_odds_away"]
 
-        df["odds_home"] = pd.to_numeric(df["odds_home"], errors="coerce")
-        df["odds_draw"] = pd.to_numeric(df["odds_draw"], errors="coerce")
-        df["odds_away"] = pd.to_numeric(df["odds_away"], errors="coerce")
+        closing_odds = df.apply(
+            lambda r: _pick_triplet(r, available_cols, CLOSING_AVG_COLS, [CLOSING_COLS]),
+            axis=1,
+            result_type="expand",
+        )
+        closing_odds.columns = ["close_odds_home", "close_odds_draw", "close_odds_away"]
+
+        df = pd.concat([df, odds, opening_odds, closing_odds], axis=1)
+
+        for col in [
+            "odds_home",
+            "odds_draw",
+            "odds_away",
+            "open_odds_home",
+            "open_odds_draw",
+            "open_odds_away",
+            "close_odds_home",
+            "close_odds_draw",
+            "close_odds_away",
+        ]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        stat_renames = {
+            "HS": "home_shots",
+            "AS": "away_shots",
+            "HST": "home_shots_target",
+            "AST": "away_shots_target",
+            "HC": "home_corners",
+            "AC": "away_corners",
+            "HY": "home_yellows",
+            "AY": "away_yellows",
+            "HR": "home_reds",
+            "AR": "away_reds",
+            "HF": "home_fouls",
+            "AF": "away_fouls",
+        }
+        df = df.rename(columns=stat_renames)
+        stat_output_cols = list(stat_renames.values())
+        for col in stat_output_cols:
+            if col not in df.columns:
+                df[col] = np.nan
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df["ou25_over_prob"] = df.apply(lambda r: _pick_over_under_25(r, available_cols), axis=1)
+        df["ah_line"] = df.apply(lambda r: _pick_ah_line(r, available_cols), axis=1)
+        df["ou25_over_prob"] = pd.to_numeric(df["ou25_over_prob"], errors="coerce")
+        df["ah_line"] = pd.to_numeric(df["ah_line"], errors="coerce")
 
         dfs.append(
             df[[
@@ -162,6 +271,15 @@ def load_league_data(league_name):
                 "odds_home",
                 "odds_draw",
                 "odds_away",
+                "open_odds_home",
+                "open_odds_draw",
+                "open_odds_away",
+                "close_odds_home",
+                "close_odds_draw",
+                "close_odds_away",
+                "ou25_over_prob",
+                "ah_line",
+                *stat_output_cols,
                 "is_played",
             ]]
         )
@@ -175,4 +293,8 @@ def load_league_data(league_name):
         keep="first"
     ).reset_index(drop=True)
 
+    out = add_understat_xg(out, league_name)
+    for col in UNDERSTAT_VALUE_COLUMNS:
+        if col not in out.columns:
+            out[col] = np.nan
     return out

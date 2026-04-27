@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from src.elo import expected_score, match_result, margin_multiplier
-from src.feature_builder import market_probs_from_odds_row
+from src.feature_builder import FEATURE_COLUMNS, feature_indices, market_probs_from_odds_row
 from src.poisson_model import (
     apply_elo_to_lambdas,
     fit_team_strengths_home_away_weighted,
@@ -29,6 +29,10 @@ class LeagueState:
     league_avg_home: float
     league_avg_away: float
     params: dict
+
+
+BASE_AUX_LEN = 12
+EXTRA_AUX_LEN = len(FEATURE_COLUMNS) - 6 - BASE_AUX_LEN
 
 
 def dynamic_init_rating(ratings: Dict[str, float], init_rating: float = 1500.0) -> float:
@@ -111,6 +115,118 @@ def get_rest_days(team: str, match_date: pd.Timestamp, last_match_date: Dict[str
     return float(days) / 7.0
 
 
+def _recent_team_means(team: str, past_matches: pd.DataFrame, window: int = 5) -> dict:
+    if past_matches.empty:
+        return {"shots": 0.0, "sot": 0.0, "corners": 0.0, "cards": 0.0, "uxg": 0.0, "unpxg": 0.0, "uxpts": 0.0}
+
+    team_matches = past_matches[
+        (past_matches["home_team"] == team) | (past_matches["away_team"] == team)
+    ].sort_values("date").tail(window)
+    if team_matches.empty:
+        return {"shots": 0.0, "sot": 0.0, "corners": 0.0, "cards": 0.0, "uxg": 0.0, "unpxg": 0.0, "uxpts": 0.0}
+
+    values = {"shots": [], "sot": [], "corners": [], "cards": [], "uxg": [], "unpxg": [], "uxpts": []}
+    for _, row in team_matches.iterrows():
+        is_home = row["home_team"] == team
+        prefix = "home" if is_home else "away"
+        shots = pd.to_numeric(row.get(f"{prefix}_shots"), errors="coerce")
+        sot = pd.to_numeric(row.get(f"{prefix}_shots_target"), errors="coerce")
+        corners = pd.to_numeric(row.get(f"{prefix}_corners"), errors="coerce")
+        yellows = pd.to_numeric(row.get(f"{prefix}_yellows"), errors="coerce")
+        reds = pd.to_numeric(row.get(f"{prefix}_reds"), errors="coerce")
+        uxg = pd.to_numeric(row.get(f"{prefix}_understat_xg"), errors="coerce")
+        unpxg = pd.to_numeric(row.get(f"{prefix}_understat_npxg"), errors="coerce")
+        uxpts = pd.to_numeric(row.get(f"{prefix}_understat_xpts"), errors="coerce")
+
+        if np.isfinite(shots):
+            values["shots"].append(float(shots))
+        if np.isfinite(sot):
+            values["sot"].append(float(sot))
+        if np.isfinite(corners):
+            values["corners"].append(float(corners))
+        card_score = (float(yellows) if np.isfinite(yellows) else 0.0) + 2.0 * (float(reds) if np.isfinite(reds) else 0.0)
+        values["cards"].append(card_score)
+        if np.isfinite(uxg):
+            values["uxg"].append(float(uxg))
+        if np.isfinite(unpxg):
+            values["unpxg"].append(float(unpxg))
+        if np.isfinite(uxpts):
+            values["uxpts"].append(float(uxpts))
+
+    return {key: float(np.mean(val)) if val else 0.0 for key, val in values.items()}
+
+
+def neutral_extra_features() -> np.ndarray:
+    extra = np.zeros(EXTRA_AUX_LEN, dtype=float)
+    ou_idx = feature_indices(["ou25_over_prob"])[0] - 6 - BASE_AUX_LEN
+    extra[ou_idx] = 0.5
+    return extra
+
+
+def _finite_or_default(value, default: float) -> float:
+    value = pd.to_numeric(value, errors="coerce")
+    if np.isfinite(value):
+        return float(value)
+    return float(default)
+
+
+def compute_pre_match_extra_features(row: pd.Series, past_matches: pd.DataFrame, window: int = 5) -> np.ndarray:
+    home = row["home_team"]
+    away = row["away_team"]
+    home_recent = _recent_team_means(home, past_matches, window=window)
+    away_recent = _recent_team_means(away, past_matches, window=window)
+
+    open_probs = market_probs_from_odds_row(
+        row.get("open_odds_home", np.nan),
+        row.get("open_odds_draw", np.nan),
+        row.get("open_odds_away", np.nan),
+    )
+    close_probs = market_probs_from_odds_row(
+        row.get("close_odds_home", row.get("odds_home", np.nan)),
+        row.get("close_odds_draw", row.get("odds_draw", np.nan)),
+        row.get("close_odds_away", row.get("odds_away", np.nan)),
+    )
+    if np.isfinite(open_probs).all() and np.isfinite(close_probs).all():
+        market_move = close_probs - open_probs
+    else:
+        market_move = np.zeros(3, dtype=float)
+
+    ou25_over_prob = _finite_or_default(row.get("ou25_over_prob", np.nan), 0.5)
+    ah_line = _finite_or_default(row.get("ah_line", np.nan), 0.0)
+
+    extra = np.array([
+        home_recent["shots"],
+        away_recent["shots"],
+        home_recent["shots"] - away_recent["shots"],
+        home_recent["sot"],
+        away_recent["sot"],
+        home_recent["sot"] - away_recent["sot"],
+        home_recent["corners"],
+        away_recent["corners"],
+        home_recent["corners"] - away_recent["corners"],
+        home_recent["cards"],
+        away_recent["cards"],
+        home_recent["cards"] - away_recent["cards"],
+        market_move[0],
+        market_move[1],
+        market_move[2],
+        ou25_over_prob,
+        ah_line,
+        home_recent["uxg"],
+        away_recent["uxg"],
+        home_recent["uxg"] - away_recent["uxg"],
+        home_recent["unpxg"],
+        away_recent["unpxg"],
+        home_recent["unpxg"] - away_recent["unpxg"],
+        home_recent["uxpts"],
+        away_recent["uxpts"],
+        home_recent["uxpts"] - away_recent["uxpts"],
+    ], dtype=float)
+    if len(extra) != EXTRA_AUX_LEN:
+        raise ValueError(f"Expected {EXTRA_AUX_LEN} extra features, got {len(extra)}")
+    return extra
+
+
 def build_league_state(played_df: pd.DataFrame, params: dict) -> LeagueState:
     played_df = played_df.sort_values("date").reset_index(drop=True)
     l_avg_h, l_avg_a, att_h, def_h, att_a, def_a = fit_team_strengths_home_away_weighted(played_df, decay=params["decay"])
@@ -144,7 +260,7 @@ def build_league_state(played_df: pd.DataFrame, params: dict) -> LeagueState:
     )
 
 
-def compute_match_components(home_team: str, away_team: str, state: LeagueState, match_date: pd.Timestamp | None = None):
+def compute_match_components(home_team: str, away_team: str, state: LeagueState, match_date: pd.Timestamp | None = None, extra_aux=None):
     p = state.params
     dyn_init = dynamic_init_rating(state.ratings)
     elo_h = state.ratings.get(home_team, dyn_init)
@@ -185,6 +301,8 @@ def compute_match_components(home_team: str, away_team: str, state: LeagueState,
         form_a,
         form_h - form_a,
     ], dtype=float)
+    if extra_aux is not None:
+        aux = np.concatenate([aux, np.asarray(extra_aux, dtype=float)])
     return {
         "elo_home": elo_h,
         "elo_away": elo_a,
@@ -213,7 +331,7 @@ def streaming_block_probs_home_away(predict_df, full_df, beta, rho, decay, K, ho
     full_df = full_df.sort_values("date")
     predict_dates = sorted(predict_df["date"].unique())
     if len(predict_dates) == 0:
-        return (np.zeros((0, 3)), np.zeros((0,), dtype=int), np.zeros((0, 3)), np.zeros((0, 12)), np.zeros((0, 3)))
+        return (np.zeros((0, 3)), np.zeros((0,), dtype=int), np.zeros((0, 3)), np.zeros((0, len(FEATURE_COLUMNS) - 6)), np.zeros((0, 3)))
 
     ratings = {}
     elo_history = {}
@@ -254,7 +372,8 @@ def streaming_block_probs_home_away(predict_df, full_df, beta, rho, decay, K, ho
 
         for _, row in day_matches.iterrows():
             raw_odds.append([row["odds_home"], row["odds_draw"], row["odds_away"]])
-            comp = compute_match_components(row["home_team"], row["away_team"], state, match_date=row["date"])
+            extra_aux = compute_pre_match_extra_features(row, past_matches)
+            comp = compute_match_components(row["home_team"], row["away_team"], state, match_date=row["date"], extra_aux=extra_aux)
             probs_model.append(comp["probs"].tolist())
             probs_mkt.append(market_probs_from_odds_row(row["odds_home"], row["odds_draw"], row["odds_away"]).tolist())
             aux.append(comp["aux"].tolist())

@@ -1,0 +1,11 @@
+run_ts_utc,experiment_name,league,selected_model,reason,market_val_logloss,selected_val_logloss,selected_val_bets,selected_val_hit_rate,selected_val_profit,selected_val_roi,test_bets,test_hit_rate,test_avg_odds,test_profit,test_roi
+2026-04-27T12:52:43.465916+00:00,final_market_xg_comparison,england,meta,positive_validation_roi_with_logloss_guard,0.966412,0.943063,237,39.2405,1.925717,53.1716,212,31.1321,3.9257,0.443231,13.1206
+2026-04-27T12:52:43.465916+00:00,final_market_xg_comparison,france,meta,positive_validation_roi_with_logloss_guard,0.955043,0.931086,202,38.6139,1.481034,47.2732,166,22.2892,3.9482,-0.770615,-28.618
+2026-04-27T12:52:43.465916+00:00,final_market_xg_comparison,germany,meta,positive_validation_roi_with_logloss_guard,0.988159,0.963001,193,38.342,1.423798,46.5444,169,30.1775,3.7929,-0.065214,-2.4459
+2026-04-27T12:52:43.465916+00:00,final_market_xg_comparison,italy,meta,positive_validation_roi_with_logloss_guard,0.951347,0.940035,252,32.9365,0.576542,16.6964,200,27.5,4.2303,-0.024536,-0.8339
+2026-04-27T12:52:43.465916+00:00,final_market_xg_comparison,spain,meta,positive_validation_roi_with_logloss_guard,0.946325,0.91977,246,36.1789,1.479842,43.1463,211,27.4882,3.9903,0.081772,2.7433
+2026-04-27T12:58:14.029499+00:00,final_market_xg_comparison,england,meta,positive_roi_and_logloss_in_all_validation_folds,0.966412,0.943063,237,39.2405,1.925717,53.1716,212,31.1321,3.9257,0.443231,13.1206
+2026-04-27T12:58:14.029499+00:00,final_market_xg_comparison,france,meta,positive_roi_and_logloss_in_all_validation_folds,0.955043,0.931086,202,38.6139,1.481034,47.2732,166,22.2892,3.9482,-0.770615,-28.618
+2026-04-27T12:58:14.029499+00:00,final_market_xg_comparison,germany,meta,positive_roi_and_logloss_in_all_validation_folds,0.988159,0.963001,193,38.342,1.423798,46.5444,169,30.1775,3.7929,-0.065214,-2.4459
+2026-04-27T12:58:14.029499+00:00,final_market_xg_comparison,italy,market,fallback_to_market,0.951347,0.951347,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2026-04-27T12:58:14.029499+00:00,final_market_xg_comparison,spain,meta,positive_roi_and_logloss_in_all_validation_folds,0.946325,0.91977,246,36.1789,1.479842,43.1463,211,27.4882,3.9903,0.081772,2.7433

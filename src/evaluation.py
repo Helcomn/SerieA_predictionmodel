@@ -17,7 +17,18 @@ def labels_from_df(df: pd.DataFrame) -> np.ndarray:
     return np.array(y, dtype=int)
 
 
-def simulate_value_betting(probs, raw_odds, y_true, edge_threshold=0.05, kelly_fraction=0.25, max_stake=0.05, match_info=None, max_odds=10.0, max_ev=1.0):
+def simulate_value_betting(
+    probs,
+    raw_odds,
+    y_true,
+    edge_threshold=0.05,
+    kelly_fraction=0.25,
+    max_stake=0.05,
+    match_info=None,
+    max_odds=10.0,
+    max_ev=1.0,
+    verbose=True,
+):
     """
     Simulates betting using a Fractional Kelly Criterion.
     - edge_threshold: Minimum EV to place a bet.
@@ -32,7 +43,7 @@ def simulate_value_betting(probs, raw_odds, y_true, edge_threshold=0.05, kelly_f
         "Away (2)": {"count": 0, "wins": 0, "invested": 0.0, "return": 0.0, "odds_sum": 0.0},
     }
     
-    if match_info is not None:
+    if verbose and match_info is not None:
         print("\n--- Detailed Betting Log (Test Set) ---")
 
     for i in range(len(probs)):
@@ -78,14 +89,15 @@ def simulate_value_betting(probs, raw_odds, y_true, edge_threshold=0.05, kelly_f
                 stats[label]["wins"] += 1
                 stats[label]["return"] += stake * odds_taken
                 
-            if match_info is not None:
+            if verbose and match_info is not None:
                 m = match_info[i]
                 date_str = m['date'].strftime('%Y-%m-%d') if hasattr(m['date'], 'strftime') else m['date']
                 res_str = "WIN" if choice == y_true[i] else "LOSS"
                 print(f"[{date_str}] {m['home_team']} vs {m['away_team']} | Bet: {label} @ {odds_taken:.2f} | EV: {best_ev*100:.1f}% | Stake: {stake*100:.1f}% | {res_str}")
 
-    print(f"\n{'Market Segment':<15} | {'Bets':<5} | {'Win%':<7} | {'ROI%':<8}")
-    print("-" * 45)
+    if verbose:
+        print(f"\n{'Market Segment':<15} | {'Bets':<5} | {'Win%':<7} | {'ROI%':<8}")
+        print("-" * 45)
 
     total_bets = 0
     total_wins = 0
@@ -97,7 +109,8 @@ def simulate_value_betting(probs, raw_odds, y_true, edge_threshold=0.05, kelly_f
         if s["count"] > 0:
             win_pc = (s["wins"] / s["count"]) * 100
             roi = ((s["return"] - s["invested"]) / s["invested"]) * 100
-            print(f"{label:<15} | {s['count']:<5} | {win_pc:>6.1f}% | {roi:>7.2f}%")
+            if verbose:
+                print(f"{label:<15} | {s['count']:<5} | {win_pc:>6.1f}% | {roi:>7.2f}%")
 
             total_bets += s["count"]
             total_wins += s["wins"]
@@ -109,8 +122,9 @@ def simulate_value_betting(probs, raw_odds, y_true, edge_threshold=0.05, kelly_f
     final_roi = (final_profit / total_inv * 100) if total_inv > 0 else 0
     avg_odds = (total_odds_sum / total_bets) if total_bets > 0 else 0
 
-    print("-" * 45)
-    print(f"{'TOTAL':<15} | {total_bets:<5} | {'-':>7} | {final_roi:>7.2f}%")
+    if verbose:
+        print("-" * 45)
+        print(f"{'TOTAL':<15} | {total_bets:<5} | {'-':>7} | {final_roi:>7.2f}%")
 
     return total_bets, total_wins, final_profit, final_roi, avg_odds
 
@@ -118,7 +132,7 @@ def simulate_value_betting(probs, raw_odds, y_true, edge_threshold=0.05, kelly_f
 CLASS_NAMES = ["H", "D", "A"]
 
 
-def _bet_records(
+def betting_records(
     probs,
     raw_odds,
     y_true,
@@ -164,6 +178,7 @@ def _bet_records(
         rows.append({
             "idx": i,
             "date": info.get("date", None),
+            "league": info.get("league", None),
             "home_team": info.get("home_team", None),
             "away_team": info.get("away_team", None),
             "y_true": int(y_true[i]),
@@ -238,6 +253,7 @@ def print_strategy_comparison(strategy_probs, raw_odds, y_true, edge_threshold=0
             y_true,
             edge_threshold=edge_threshold,
             match_info=None,
+            verbose=False,
         )
         hit_rate = (wins / bets * 100.0) if bets > 0 else 0.0
         rows.append({
@@ -298,7 +314,7 @@ def print_profit_profile_audit(probs, raw_odds, y_true, match_info, edge_thresho
     print("=== PROFIT PROFILE AUDIT ===")
     print("=" * 70)
 
-    bets_df = _bet_records(
+    bets_df = betting_records(
         probs,
         raw_odds,
         y_true,
