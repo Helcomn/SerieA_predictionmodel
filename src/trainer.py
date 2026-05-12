@@ -8,6 +8,12 @@ from sklearn.metrics import log_loss
 from xgboost import XGBClassifier
 
 from src.artifact_store import append_rows_to_csv, load_json_if_exists, load_pickle_if_exists, save_json, save_manifest, save_pickle
+from src.bet_selection import (
+    write_alternative_market_report,
+    write_data_enrichment_audit,
+    write_probability_quality_report,
+    write_validation_selected_betting_reports,
+)
 from src.betting_robustness import write_betting_robustness_report, write_league_specific_strategy_report
 from src.calibration import temperature_scale_probs
 from src.config import DEFAULT_CONFIG, ExperimentConfig
@@ -58,6 +64,36 @@ from src.state_builder import streaming_block_probs_home_away
 
 
 PIPELINE_VERSION = 7
+
+
+MATCH_INFO_COLUMNS = [
+    "date",
+    "home_team",
+    "away_team",
+    "home_goals",
+    "away_goals",
+    "odds_home",
+    "odds_draw",
+    "odds_away",
+    "open_odds_home",
+    "open_odds_draw",
+    "open_odds_away",
+    "close_odds_home",
+    "close_odds_draw",
+    "close_odds_away",
+    "ou25_over_prob",
+    "ou25_over_odds",
+    "ou25_under_odds",
+    "ah_line",
+]
+
+
+def _match_info_records(df, league: str) -> list[dict]:
+    cols = [col for col in MATCH_INFO_COLUMNS if col in df.columns]
+    records = df[cols].to_dict("records")
+    for row in records:
+        row["league"] = league
+    return records
 
 
 def _cached_artifacts_are_compatible(config: ExperimentConfig) -> bool:
@@ -218,9 +254,10 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     league_best_params = {} if cached_params is None else cached_params
     all_X_early, all_y_early = [], []
     all_X_late, all_y_late = [], []
+    all_late_raw_odds, all_late_info = [], []
     all_X_val, all_y_val = [], []
     all_X_test, all_y_test = [], []
-    all_v_probs_model, all_v_mkt_fixed, all_v_raw_odds, all_v_info = [], [], [], []
+    all_v_info = []
     all_t_probs_model, all_t_mkt_fixed, all_t_raw_odds, all_t_info = [], [], [], []
     per_league_test = {}
 
@@ -256,7 +293,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
 
         val_early, val_late = time_split_val(val)
         ve_probs_raw, ve_y, ve_mkt, ve_aux, _ = streaming_block_probs_home_away(val_early, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
-        vl_probs_raw, vl_y, vl_mkt, vl_aux, _ = streaming_block_probs_home_away(val_late, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
+        vl_probs_raw, vl_y, vl_mkt, vl_aux, vl_raw_odds = streaming_block_probs_home_away(val_late, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
         ve_probs_model = temperature_scale_probs(ve_probs_raw, params["T"])
         vl_probs_model = temperature_scale_probs(vl_probs_raw, params["T"])
 
@@ -264,18 +301,15 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         all_y_early.extend(ve_y)
         all_X_late.extend(build_meta_features(vl_probs_model, vl_mkt, vl_aux))
         all_y_late.extend(vl_y)
+        all_late_raw_odds.extend(vl_raw_odds)
+        all_late_info.extend(_match_info_records(val_late, league))
 
-        v_probs_raw, v_y, v_mkt, v_aux, v_raw_odds = streaming_block_probs_home_away(val, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
+        v_probs_raw, v_y, v_mkt, v_aux, _ = streaming_block_probs_home_away(val, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
         v_probs_model = temperature_scale_probs(v_probs_raw, params["T"])
         v_mkt_fixed = ensure_market_probs(v_probs_model, v_mkt)
         all_X_val.extend(build_meta_features(v_probs_model, v_mkt_fixed, v_aux))
         all_y_val.extend(v_y)
-        all_v_probs_model.extend(v_probs_model)
-        all_v_mkt_fixed.extend(v_mkt_fixed)
-        all_v_raw_odds.extend(v_raw_odds)
-        val_info = val[["date", "home_team", "away_team"]].to_dict("records")
-        for row in val_info:
-            row["league"] = league
+        val_info = _match_info_records(val, league)
         all_v_info.extend(val_info)
 
         t_probs_raw, t_y, t_mkt, t_aux, t_raw_odds = streaming_block_probs_home_away(test, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
@@ -287,9 +321,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         all_t_probs_model.extend(t_probs_model)
         all_t_mkt_fixed.extend(t_mkt_fixed)
         all_t_raw_odds.extend(t_raw_odds)
-        test_info = test[["date", "home_team", "away_team"]].to_dict("records")
-        for row in test_info:
-            row["league"] = league
+        test_info = _match_info_records(test, league)
         all_t_info.extend(test_info)
         per_league_test[league] = {"y": np.array(t_y, dtype=int), "p_model": np.array(t_probs_model, dtype=float), "p_mkt": np.array(t_mkt_fixed, dtype=float)}
 
@@ -301,9 +333,8 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     X_late_arr, y_late_arr = np.array(all_X_late), np.array(all_y_late)
     X_val_arr, y_val_arr = np.array(all_X_val), np.array(all_y_val)
     X_test_arr, y_test_arr = np.array(all_X_test), np.array(all_y_test)
-    v_probs_model_arr, v_mkt_fixed_arr = np.array(all_v_probs_model), np.array(all_v_mkt_fixed)
     t_probs_model_arr, t_mkt_fixed_arr = np.array(all_t_probs_model), np.array(all_t_mkt_fixed)
-    val_raw_odds_arr = np.array(all_v_raw_odds)
+    late_raw_odds_arr = np.array(all_late_raw_odds)
     raw_odds_arr = np.array(all_t_raw_odds)
 
     threshold = 0.05
@@ -558,7 +589,9 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     late_probs_mlp = temperature_scale_probs(late_probs_mlp_raw, float(best_mlp_cfg["temperature"]))
     late_probs_base = probs_from_meta_features(X_late_arr, 0)
     late_probs_mkt = probs_from_meta_features(X_late_arr, 3)
-    late_probs_logreg_raw = logreg_final.predict_proba(X_late_arr[:, logreg_cols])
+    logreg_late_model = make_logreg_pipeline(logreg_cfg["C"])
+    logreg_late_model.fit(X_early_arr[:, logreg_cols], y_early_arr)
+    late_probs_logreg_raw = logreg_late_model.predict_proba(X_late_arr[:, logreg_cols])
     late_probs_logreg = temperature_scale_probs(late_probs_logreg_raw, float(logreg_cfg["temperature"]))
     late_market_ll = float(log_loss(y_late_arr, late_probs_mkt))
     late_mlp_ll = float(log_loss(y_late_arr, late_probs_mlp))
@@ -587,12 +620,15 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         print(f"Saved blend weights to: {config.blend_file}")
     print(f"Blend weights: {blend_cfg['weights']}")
     print(f"Late VAL LogLoss: {round(blend_cfg['late_val_logloss'], 4)}")
-
-    v_probs_meta = meta_final.predict_proba(X_val_arr[:, xgb_cols])
-    v_probs_mlp_raw = mlp_model.predict_proba(X_val_mlp)
-    v_probs_mlp = temperature_scale_probs(v_probs_mlp_raw, float(best_mlp_cfg["temperature"]))
-    v_probs_logreg_raw = logreg_final.predict_proba(X_val_arr[:, logreg_cols])
-    v_probs_logreg = temperature_scale_probs(v_probs_logreg_raw, float(logreg_cfg["temperature"]))
+    late_probs_blend = blend_probabilities(
+        blend_cfg["weights"],
+        {
+            "base": late_probs_base,
+            "market": late_probs_mkt,
+            "xgb": late_probs_xgb,
+            "mlp": late_probs_mlp if blend_cfg.get("mlp_allowed", mlp_allowed_in_blend) else None,
+        },
+    )
 
     t_probs_meta = meta_final.predict_proba(X_test_arr[:, xgb_cols])
     t_probs_mlp_raw = mlp_model.predict_proba(X_test_mlp)
@@ -608,7 +644,6 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             "mlp": t_probs_mlp if blend_cfg.get("mlp_allowed", mlp_allowed_in_blend) else None,
         },
     )
-
     print("\n" + "=" * 50)
     print("=== QUICK NO-MARKET ABLATION ===")
     print("=" * 50)
@@ -730,17 +765,74 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         })
     append_rows_to_csv(config.ablations_csv_file, ablation_csv_rows)
     _write_final_summary(config, selection_rows, ablation_rows, run_ts)
-    write_betting_robustness_report(
+    late_validation_strategy_probs = {
+        "base": late_probs_base,
+        "market": late_probs_mkt,
+        "meta": late_probs_xgb,
+        "logreg": late_probs_logreg,
+        "mlp": late_probs_mlp,
+        "ensemble": late_probs_blend,
+    }
+    test_strategy_probs = {
+        "base": t_probs_model_arr,
+        "market": t_mkt_fixed_arr,
+        "meta": t_probs_meta,
+        "logreg": t_probs_logreg,
+        "mlp": t_probs_mlp,
+        "ensemble": t_probs_blend,
+    }
+    write_probability_quality_report(
         config,
         run_ts,
         {
-            "base": t_probs_model_arr,
-            "market": t_mkt_fixed_arr,
-            "meta": t_probs_meta,
-            "logreg": t_probs_logreg,
-            "mlp": t_probs_mlp,
-            "ensemble": t_probs_blend,
+            "validation": late_validation_strategy_probs,
+            "test": test_strategy_probs,
         },
+        {
+            "validation": y_late_arr,
+            "test": y_test_arr,
+        },
+    )
+    write_validation_selected_betting_reports(
+        config,
+        run_ts,
+        late_validation_strategy_probs,
+        late_raw_odds_arr,
+        y_late_arr,
+        all_late_info,
+        test_strategy_probs,
+        raw_odds_arr,
+        y_test_arr,
+        all_t_info,
+    )
+    write_alternative_market_report(
+        config,
+        run_ts,
+        {
+            "validation": late_validation_strategy_probs,
+            "test": test_strategy_probs,
+        },
+        {
+            "validation": X_late_arr,
+            "test": X_test_arr,
+        },
+        {
+            "validation": all_late_info,
+            "test": all_t_info,
+        },
+    )
+    write_data_enrichment_audit(
+        config,
+        run_ts,
+        {
+            "validation": all_v_info,
+            "test": all_t_info,
+        },
+    )
+    write_betting_robustness_report(
+        config,
+        run_ts,
+        test_strategy_probs,
         raw_odds_arr,
         y_test_arr,
         all_t_info,
@@ -749,23 +841,11 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     write_league_specific_strategy_report(
         config,
         run_ts,
-        {
-            "base": v_probs_model_arr,
-            "market": v_mkt_fixed_arr,
-            "meta": v_probs_meta,
-            "logreg": v_probs_logreg,
-            "mlp": v_probs_mlp,
-        },
-        val_raw_odds_arr,
-        y_val_arr,
-        all_v_info,
-        {
-            "base": t_probs_model_arr,
-            "market": t_mkt_fixed_arr,
-            "meta": t_probs_meta,
-            "logreg": t_probs_logreg,
-            "mlp": t_probs_mlp,
-        },
+        late_validation_strategy_probs,
+        late_raw_odds_arr,
+        y_late_arr,
+        all_late_info,
+        test_strategy_probs,
         raw_odds_arr,
         y_test_arr,
         all_t_info,

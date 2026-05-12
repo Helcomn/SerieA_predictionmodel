@@ -130,6 +130,7 @@ def simulate_value_betting(
 
 
 CLASS_NAMES = ["H", "D", "A"]
+ODDS_SUFFIXES = ["home", "draw", "away"]
 
 
 def betting_records(
@@ -175,6 +176,14 @@ def betting_records(
         profit = ret - stake
 
         info = match_info[i] if match_info is not None else {}
+        suffix = ODDS_SUFFIXES[int(choice)]
+        open_odds_taken = info.get(f"open_odds_{suffix}", np.nan)
+        close_odds_taken = info.get(f"close_odds_{suffix}", np.nan)
+        open_odds_value = pd.to_numeric(open_odds_taken, errors="coerce")
+        close_odds_value = pd.to_numeric(close_odds_taken, errors="coerce")
+        clv_decimal = np.nan
+        if np.isfinite(open_odds_value) and np.isfinite(close_odds_value) and float(close_odds_value) > 1.0001:
+            clv_decimal = (float(open_odds_value) / float(close_odds_value)) - 1.0
         rows.append({
             "idx": i,
             "date": info.get("date", None),
@@ -187,6 +196,9 @@ def betting_records(
             "pred_label": CLASS_NAMES[int(choice)],
             "prob_taken": float(prob_taken),
             "odds_taken": float(odds_taken),
+            "open_odds_taken": float(open_odds_value) if np.isfinite(open_odds_value) else np.nan,
+            "close_odds_taken": float(close_odds_value) if np.isfinite(close_odds_value) else np.nan,
+            "clv_decimal": float(clv_decimal) if np.isfinite(clv_decimal) else np.nan,
             "best_ev": float(best_ev),
             "stake": float(stake),
             "return": float(ret),

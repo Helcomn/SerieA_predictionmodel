@@ -10,6 +10,12 @@ Save the Understat/Kaggle match or game stats CSV as:
 data/external/understat_matches.csv
 ```
 
+Or refresh it directly from Understat:
+
+```bash
+python src/update_understat.py
+```
+
 Supported schemas:
 
 - Match-level rows with columns like `date`, `league`, `team_h`, `team_a`, `h_xg`, `a_xg`

@@ -2,6 +2,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.team_names import normalize_team_name
 from src.understat_data import UNDERSTAT_VALUE_COLUMNS, add_understat_xg
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -124,6 +125,16 @@ def _pick_over_under_25(row, available_cols):
     return np.nan
 
 
+def _pick_over_under_25_odds(row, available_cols):
+    for over_col, under_col in OVER_UNDER_COLS:
+        if over_col in available_cols and under_col in available_cols:
+            over = pd.to_numeric(row.get(over_col), errors="coerce")
+            under = pd.to_numeric(row.get(under_col), errors="coerce")
+            if np.isfinite(over) and np.isfinite(under) and over > 1.0001 and under > 1.0001:
+                return float(over), float(under)
+    return (np.nan, np.nan)
+
+
 def _pick_ah_line(row, available_cols):
     for col in AH_LINE_COLS:
         if col in available_cols:
@@ -178,6 +189,8 @@ def load_league_data(league_name):
             "FTHG": "home_goals",
             "FTAG": "away_goals",
         })
+        df["home_team"] = df["home_team"].map(lambda x: normalize_team_name(x, league_name))
+        df["away_team"] = df["away_team"].map(lambda x: normalize_team_name(x, league_name))
 
         # parse dates
         dt1 = pd.to_datetime(df["date"], format="%d/%m/%y", errors="coerce")
@@ -257,8 +270,17 @@ def load_league_data(league_name):
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
         df["ou25_over_prob"] = df.apply(lambda r: _pick_over_under_25(r, available_cols), axis=1)
+        ou25_odds = df.apply(
+            lambda r: _pick_over_under_25_odds(r, available_cols),
+            axis=1,
+            result_type="expand",
+        )
+        ou25_odds.columns = ["ou25_over_odds", "ou25_under_odds"]
+        df = pd.concat([df, ou25_odds], axis=1)
         df["ah_line"] = df.apply(lambda r: _pick_ah_line(r, available_cols), axis=1)
         df["ou25_over_prob"] = pd.to_numeric(df["ou25_over_prob"], errors="coerce")
+        df["ou25_over_odds"] = pd.to_numeric(df["ou25_over_odds"], errors="coerce")
+        df["ou25_under_odds"] = pd.to_numeric(df["ou25_under_odds"], errors="coerce")
         df["ah_line"] = pd.to_numeric(df["ah_line"], errors="coerce")
 
         dfs.append(
@@ -278,6 +300,8 @@ def load_league_data(league_name):
                 "close_odds_draw",
                 "close_odds_away",
                 "ou25_over_prob",
+                "ou25_over_odds",
+                "ou25_under_odds",
                 "ah_line",
                 *stat_output_cols,
                 "is_played",

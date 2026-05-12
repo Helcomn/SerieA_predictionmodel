@@ -7,10 +7,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.evaluation import simulate_value_betting
+import src.data_processing as data_processing
+from src.evaluation import betting_records, simulate_value_betting
 from src.feature_builder import ensure_market_probs, market_probs_from_odds_row
 from src.models.meta import blend_probabilities
 from src.state_builder import EXTRA_AUX_LEN, compute_pre_match_extra_features
+from src.team_names import normalize_team_name
 from src.understat_data import add_understat_xg
 
 
@@ -36,6 +38,49 @@ class FeatureBuilderTests(unittest.TestCase):
         np.testing.assert_allclose(fixed[1], market[1])
 
 
+class TeamNameTests(unittest.TestCase):
+    def test_fixture_team_aliases_match_historical_names(self):
+        self.assertEqual(normalize_team_name("FC Barcelona", "spain"), "Barcelona")
+        self.assertEqual(normalize_team_name("Rayo Vallecano", "spain"), "Vallecano")
+        self.assertEqual(normalize_team_name("Borussia Dortmund", "germany"), "Dortmund")
+        self.assertEqual(normalize_team_name("1. FC Heidenheim 1846", "germany"), "Heidenheim")
+
+    def test_loader_normalizes_downloaded_fixture_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_dir = root / "data" / "raw" / "spain"
+            raw_dir.mkdir(parents=True)
+            pd.DataFrame([
+                {
+                    "Date": "01/01/2026",
+                    "HomeTeam": "Barcelona",
+                    "AwayTeam": "Alaves",
+                    "FTHG": 2,
+                    "FTAG": 0,
+                },
+                {
+                    "Date": "08/01/2026",
+                    "HomeTeam": "Alaves",
+                    "AwayTeam": "FC Barcelona",
+                    "FTHG": np.nan,
+                    "FTAG": np.nan,
+                },
+            ]).to_csv(raw_dir / "SP1_2025_fixtures.csv", index=False)
+
+            original_root = data_processing.PROJECT_ROOT
+            original_add_understat_xg = data_processing.add_understat_xg
+            try:
+                data_processing.PROJECT_ROOT = root
+                data_processing.add_understat_xg = lambda df, league_name: df
+                loaded = data_processing.load_league_data("spain")
+            finally:
+                data_processing.PROJECT_ROOT = original_root
+                data_processing.add_understat_xg = original_add_understat_xg
+
+        self.assertIn("Barcelona", set(loaded["away_team"]))
+        self.assertNotIn("FC Barcelona", set(loaded["away_team"]))
+
+
 class BettingSimulationTests(unittest.TestCase):
     def test_betting_simulation_can_run_silently(self):
         probs = np.array([[0.55, 0.25, 0.20]])
@@ -49,6 +94,41 @@ class BettingSimulationTests(unittest.TestCase):
         self.assertEqual(buf.getvalue(), "")
         self.assertEqual(result[0], 1)
         self.assertEqual(result[1], 1)
+
+    def test_betting_records_include_open_to_close_value_when_available(self):
+        probs = np.array([[0.55, 0.25, 0.20]])
+        odds = np.array([[2.1, 3.2, 4.5]])
+        y_true = np.array([0])
+        match_info = [{
+            "date": pd.Timestamp("2025-01-01"),
+            "league": "england",
+            "home_team": "A",
+            "away_team": "B",
+            "open_odds_home": 2.1,
+            "close_odds_home": 2.0,
+        }]
+
+        records = betting_records(probs, odds, y_true, match_info=match_info)
+
+        self.assertEqual(len(records), 1)
+        self.assertAlmostEqual(float(records.loc[0, "clv_decimal"]), 0.05)
+
+    def test_betting_records_leave_clv_blank_without_opening_price(self):
+        probs = np.array([[0.55, 0.25, 0.20]])
+        odds = np.array([[2.1, 3.2, 4.5]])
+        y_true = np.array([0])
+        match_info = [{
+            "date": pd.Timestamp("2025-01-01"),
+            "league": "england",
+            "home_team": "A",
+            "away_team": "B",
+            "close_odds_home": 2.0,
+        }]
+
+        records = betting_records(probs, odds, y_true, match_info=match_info)
+
+        self.assertEqual(len(records), 1)
+        self.assertTrue(np.isnan(float(records.loc[0, "clv_decimal"])))
 
 
 class BlendTests(unittest.TestCase):
@@ -105,6 +185,38 @@ class RollingFeatureTests(unittest.TestCase):
         self.assertEqual(features[2], 5.0)
         self.assertAlmostEqual(features[15], 0.57)
         self.assertAlmostEqual(features[16], -0.5)
+
+    def test_loader_extracts_over_under_25_odds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_dir = root / "data" / "raw" / "england"
+            raw_dir.mkdir(parents=True)
+            pd.DataFrame([{
+                "Date": "01/01/2025",
+                "HomeTeam": "Arsenal",
+                "AwayTeam": "Chelsea",
+                "FTHG": 2,
+                "FTAG": 1,
+                "B365H": 2.0,
+                "B365D": 3.5,
+                "B365A": 4.0,
+                "AvgC>2.5": 1.8,
+                "AvgC<2.5": 2.1,
+            }]).to_csv(raw_dir / "E0_2024.csv", index=False)
+
+            original_root = data_processing.PROJECT_ROOT
+            original_add_understat_xg = data_processing.add_understat_xg
+            try:
+                data_processing.PROJECT_ROOT = root
+                data_processing.add_understat_xg = lambda df, league_name: df
+                loaded = data_processing.load_league_data("england")
+            finally:
+                data_processing.PROJECT_ROOT = original_root
+                data_processing.add_understat_xg = original_add_understat_xg
+
+        self.assertAlmostEqual(float(loaded.loc[0, "ou25_over_odds"]), 1.8)
+        self.assertAlmostEqual(float(loaded.loc[0, "ou25_under_odds"]), 2.1)
+        self.assertTrue(np.isfinite(float(loaded.loc[0, "ou25_over_prob"])))
 
     def test_understat_match_rows_join_to_loaded_matches(self):
         base = pd.DataFrame([{

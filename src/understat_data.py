@@ -32,6 +32,7 @@ TEAM_ALIASES = {
     "sheffield utd": "sheffield utd",
     "nottm forest": "nottingham forest",
     "nottingham forest": "nottm forest",
+    "nott m forest": "nottm forest",
     "leeds": "leeds united",
     "leicester": "leicester city",
     "norwich": "norwich city",
@@ -63,6 +64,7 @@ TEAM_ALIASES = {
     "roma": "roma",
     "hellas verona": "verona",
     "spal": "spal 2013",
+    "parma calcio 1913": "parma",
     "huesca": "sd huesca",
     "valladolid": "real valladolid",
     "real valladolid": "real valladolid",
@@ -83,6 +85,7 @@ TEAM_ALIASES = {
     "vallecano": "rayo",
     "real sociedad": "sociedad",
     "sociedad": "sociedad",
+    "real oviedo": "oviedo",
     "sporting gijon": "sporting gijon",
     "paris saint germain": "psg",
     "paris sg": "psg",
@@ -237,6 +240,35 @@ def _from_team_rows(raw: pd.DataFrame, league_name: str) -> pd.DataFrame | None:
     return out.dropna(subset=["date", "home_key", "away_key"])
 
 
+def _fill_near_date_matches(merged: pd.DataFrame, understat: pd.DataFrame, max_days: int = 2) -> pd.DataFrame:
+    if merged.empty or understat.empty:
+        return merged
+
+    missing = merged["home_understat_xg"].isna() & merged["away_understat_xg"].isna()
+    if not missing.any():
+        return merged
+
+    by_teams = {
+        key: group.sort_values("date").reset_index(drop=True)
+        for key, group in understat.groupby(["home_key", "away_key"], dropna=False)
+    }
+    for idx, row in merged.loc[missing].iterrows():
+        candidates = by_teams.get((row["home_key"], row["away_key"]))
+        if candidates is None or pd.isna(row["date_key"]):
+            continue
+
+        day_diffs = (candidates["date"] - row["date_key"]).abs().dt.days
+        close = candidates[day_diffs <= max_days]
+        if close.empty:
+            continue
+
+        best_idx = day_diffs[day_diffs <= max_days].idxmin()
+        best = candidates.loc[best_idx]
+        for col in UNDERSTAT_VALUE_COLUMNS:
+            merged.at[idx, col] = best[col]
+    return merged
+
+
 def add_understat_xg(df: pd.DataFrame, league_name: str, path: Path = UNDERSTAT_MATCHES_FILE) -> pd.DataFrame:
     out = df.copy()
     for col in UNDERSTAT_VALUE_COLUMNS:
@@ -269,6 +301,11 @@ def add_understat_xg(df: pd.DataFrame, league_name: str, path: Path = UNDERSTAT_
         join_col = f"{col}_understat_join"
         if join_col in merged.columns:
             merged[col] = merged[join_col]
+
+    merged = _fill_near_date_matches(merged, understat)
+    if "is_played" in merged.columns:
+        unplayed_mask = merged["is_played"] != True
+        merged.loc[unplayed_mask, UNDERSTAT_VALUE_COLUMNS] = np.nan
 
     drop_cols = [c for c in merged.columns if c.endswith("_understat_join")]
     drop_cols.extend(["date_key", "home_key", "away_key"])
@@ -304,6 +341,20 @@ def understat_coverage_report(fixtures_df: pd.DataFrame, league_name: str, path:
     ].copy()
     if played_overlap.empty:
         return {"league": league_name, "played": len(played), "matched": 0, "coverage": 0.0, "unmatched_teams": [], "understat_min_date": min_date, "understat_max_date": max_date}
+
+    if {"home_understat_xg", "away_understat_xg"}.issubset(played_overlap.columns):
+        matched_mask = played_overlap["home_understat_xg"].notna() & played_overlap["away_understat_xg"].notna()
+        unmatched = played_overlap[~matched_mask]
+        unmatched_teams = sorted(set(unmatched["home_team"]) | set(unmatched["away_team"]))
+        return {
+            "league": league_name,
+            "played": int(len(played_overlap)),
+            "matched": int(matched_mask.sum()),
+            "coverage": float(matched_mask.mean()),
+            "unmatched_teams": unmatched_teams,
+            "understat_min_date": min_date,
+            "understat_max_date": max_date,
+        }
 
     probe = played_overlap[["date", "home_team", "away_team"]].copy()
     probe["date_key"] = pd.to_datetime(probe["date"], errors="coerce").dt.normalize()

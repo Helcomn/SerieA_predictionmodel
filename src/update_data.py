@@ -50,6 +50,14 @@ TEAM_NAME_MAP = {
     },
     "spain": {
         "Athletic Club": "Ath Bilbao",
+        "CA Osasuna": "Osasuna",
+        "Elche CF": "Elche",
+        "FC Barcelona": "Barcelona",
+        "Getafe CF": "Getafe",
+        "Girona FC": "Girona",
+        "Levante UD": "Levante",
+        "Rayo Vallecano": "Vallecano",
+        "RCD Mallorca": "Mallorca",
         "Atlético Madrid": "Ath Madrid",
         "Atlético de Madrid": "Ath Madrid",
         "RCD Espanyol de Barcelona": "Espanol",
@@ -59,6 +67,8 @@ TEAM_NAME_MAP = {
         "RC Celta": "Celta",
         "Real Sociedad": "Sociedad",
         "Real Betis": "Betis",
+        "Sevilla FC": "Sevilla",
+        "Valencia CF": "Valencia",
     },
     "italy": {
         "Inter Milan": "Inter",
@@ -66,14 +76,21 @@ TEAM_NAME_MAP = {
         "Hellas Verona": "Verona",
     },
     "germany": {
+        "1. FC Heidenheim 1846": "Heidenheim",
+        "Borussia Dortmund": "Dortmund",
         "Borussia Mönchengladbach": "M'gladbach",
         "FC Bayern München": "Bayern Munich",
         "1. FC Köln": "FC Koln",
         "Eintracht Frankfurt": "Ein Frankfurt",
+        "FC Augsburg": "Augsburg",
         "FC St. Pauli": "St Pauli",
+        "Hamburger SV": "Hamburg",
         "1. FC Union Berlin": "Union Berlin",
         "1. FSV Mainz 05": "Mainz",
+        "SV Werder Bremen": "Werder Bremen",
+        "TSG Hoffenheim": "Hoffenheim",
         "VfB Stuttgart": "Stuttgart",
+        "VfL Wolfsburg": "Wolfsburg",
         "Sport-Club Freiburg": "Freiburg",
         "Bayer 04 Leverkusen": "Leverkusen",
     },
@@ -103,7 +120,7 @@ TEAM_NAME_MAP = {
 def normalize_team_name(name, league_folder):
     if pd.isna(name):
         return name
-    name = str(name).strip()
+    name = " ".join(str(name).strip().split())
     return TEAM_NAME_MAP.get(league_folder, {}).get(name, name)
 
 
@@ -225,11 +242,9 @@ def download_historical_data():
                 continue
 
             remote_content = response.content
-            remote_size = len(remote_content)
 
             if local_filepath.exists():
-                local_size = local_filepath.stat().st_size
-                if local_size == remote_size:
+                if local_filepath.read_bytes() == remote_content:
                     skipped_count += 1
                     continue
                 updated_count += 1

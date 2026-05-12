@@ -13,12 +13,12 @@ class ExperimentConfig:
     test_cut: str = "2025-07-01"
     leagues: tuple[str, ...] = ("england", "spain", "italy", "germany", "france")
     use_cached_artifacts: bool = True
-    force_retune_leagues: bool = False
-    force_retune_meta: bool = False
-    force_refit_meta_model: bool = False
-    force_retune_mlp: bool = False
-    force_refit_mlp_model: bool = False
-    force_retune_blend: bool = False
+    force_retune_leagues: bool = True
+    force_retune_meta: bool = True
+    force_refit_meta_model: bool = True
+    force_retune_mlp: bool = True
+    force_refit_mlp_model: bool = True
+    force_retune_blend: bool = True
     random_state: int = 42
     max_upcoming_window_days: int = 4
     detailed_betting_log: bool = False
@@ -83,6 +83,26 @@ class ExperimentConfig:
     @property
     def final_league_strategy_file(self) -> Path:
         return self.artifacts_dir / f"final_league_strategy_{self.experiment_name}.csv"
+
+    @property
+    def final_probability_quality_file(self) -> Path:
+        return self.artifacts_dir / f"final_probability_quality_{self.experiment_name}.csv"
+
+    @property
+    def final_bet_selector_file(self) -> Path:
+        return self.artifacts_dir / f"final_bet_selector_{self.experiment_name}.csv"
+
+    @property
+    def final_bet_bucket_file(self) -> Path:
+        return self.artifacts_dir / f"final_bet_buckets_{self.experiment_name}.csv"
+
+    @property
+    def final_alternative_markets_file(self) -> Path:
+        return self.artifacts_dir / f"final_alternative_markets_{self.experiment_name}.csv"
+
+    @property
+    def final_data_enrichment_file(self) -> Path:
+        return self.artifacts_dir / f"final_data_enrichment_audit_{self.experiment_name}.csv"
 
     def as_manifest(self) -> Dict:
         data = asdict(self)
