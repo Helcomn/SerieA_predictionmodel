@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, UTC
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from src.evaluation import (
 )
 from src.feature_builder import (
     BASE_NON_MARKET_FEATURE_COLUMNS,
+    EXTERNAL_CONTEXT_FEATURE_COLUMNS,
     FEATURE_COLUMNS,
     LOCAL_STATS_FEATURE_COLUMNS,
     MARKET_CONTEXT_FEATURE_COLUMNS,
@@ -36,7 +38,9 @@ from src.feature_builder import (
     NEW_DATA_FEATURE_COLUMNS,
     NEW_LOCAL_FEATURE_COLUMNS,
     ODDS_MOVEMENT_FEATURE_COLUMNS,
+    TEAM_NEWS_FEATURE_COLUMNS,
     UNDERSTAT_XG_FEATURE_COLUMNS,
+    WEATHER_FEATURE_COLUMNS,
     build_meta_features,
     ensure_market_probs,
     feature_indices,
@@ -61,9 +65,19 @@ from src.reporting import print_per_league_test_metrics
 from src.reporting_ext import print_confusion, print_prob_report
 from src.services.upcoming import generate_upcoming_matchday_picks
 from src.state_builder import streaming_block_probs_home_away
+from src.external_context import EXTERNAL_CONTEXT_VALUE_COLUMNS, MATCH_CONTEXT_FILE
 
 
-PIPELINE_VERSION = 7
+PIPELINE_VERSION = 8
+
+PARAMETER_IMPACT_BASELINE = {
+    "K": 50,
+    "ha": 80,
+    "beta": 0.12,
+    "decay": 0.001,
+    "rho": 0.0,
+    "T": 1.0,
+}
 
 
 MATCH_INFO_COLUMNS = [
@@ -85,6 +99,7 @@ MATCH_INFO_COLUMNS = [
     "ou25_over_odds",
     "ou25_under_odds",
     "ah_line",
+    *EXTERNAL_CONTEXT_VALUE_COLUMNS,
 ]
 
 
@@ -94,6 +109,37 @@ def _match_info_records(df, league: str) -> list[dict]:
     for row in records:
         row["league"] = league
     return records
+
+
+def _split_played_periods(df, config: ExperimentConfig):
+    train_fit = df[df["date"] < config.train_cut].copy()
+    val = df[(df["date"] >= config.train_cut) & (df["date"] < config.test_cut)].copy()
+    if config.test_end is None:
+        test = df[df["date"] >= config.test_cut].copy()
+    else:
+        test = df[(df["date"] >= config.test_cut) & (df["date"] < config.test_end)].copy()
+    return train_fit, val, test
+
+
+def _file_fingerprint(path: Path) -> dict:
+    if not path.exists():
+        return {"exists": False}
+    digest = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    stat = path.stat()
+    return {
+        "exists": True,
+        "size": int(stat.st_size),
+        "sha1": digest.hexdigest(),
+    }
+
+
+def _data_fingerprint() -> dict:
+    return {
+        "match_context": _file_fingerprint(MATCH_CONTEXT_FILE),
+    }
 
 
 def _cached_artifacts_are_compatible(config: ExperimentConfig) -> bool:
@@ -114,6 +160,9 @@ def _cached_artifacts_are_compatible(config: ExperimentConfig) -> bool:
 
     if manifest.get("feature_columns") != FEATURE_COLUMNS:
         print("Cached artifact feature schema mismatch; retuning/refitting artifacts.")
+        return False
+    if manifest.get("data_fingerprint") != _data_fingerprint():
+        print("Cached artifact data fingerprint mismatch; retuning/refitting artifacts.")
         return False
     mlp_feature_columns = manifest.get("mlp_feature_columns")
     if not mlp_feature_columns or any(col not in FEATURE_COLUMNS for col in mlp_feature_columns):
@@ -145,42 +194,182 @@ def _model_summary_row(name: str, probs: np.ndarray, y_true: np.ndarray, raw_odd
     }
 
 
-def _print_model_selection_summary(rows: list[dict]):
-    print("\n" + "=" * 70)
-    print("=== MODEL SELECTION SUMMARY ===")
-    print("=" * 70)
-
-    print(
-        f"{'Model':<12} | {'LogLoss':>8} | {'Acc%':>6} | {'Bets':>5} | {'Hit%':>6} | {'ROI%':>7} | {'Profit':>8}"
+def _league_param_text(params: dict) -> str:
+    return (
+        f"K={params.get('K')}, ha={params.get('ha')}, beta={params.get('beta')}, "
+        f"decay={params.get('decay')}, rho={params.get('rho')}, T={params.get('T')}"
     )
-    print("-" * 70)
-    for row in sorted(rows, key=lambda r: (r["logloss"], -r["roi"])):
+
+
+def _fmt_int_param(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"{int(value)}"
+
+
+def _fmt_float_param(value, *, decimals: int = 4, signed: bool = False) -> str:
+    if value is None:
+        return "n/a"
+    value = float(value)
+    sign = "+" if signed else ""
+    return f"{value:{sign}.{decimals}f}"
+
+
+def _print_league_run_header(league: str) -> None:
+    print("\n" + "-" * 64)
+    print(f"LEAGUE  {league.upper()}")
+    print("-" * 64)
+
+
+def _print_split_counts(train_fit, val, test) -> None:
+    print(f"Rows    train_fit={len(train_fit):,} | validation={len(val):,} | test={len(test):,}")
+
+
+def _print_league_params(params: dict, *, source: str) -> None:
+    print(f"Params  {source}")
+    print(
+        f"        Elo:   K={_fmt_int_param(params.get('K')):<3} | "
+        f"home_adv={_fmt_int_param(params.get('ha')):<3}"
+    )
+    print(
+        f"        Goals: beta={_fmt_float_param(params.get('beta'))} | "
+        f"decay={_fmt_float_param(params.get('decay'))} | "
+        f"rho={_fmt_float_param(params.get('rho'), signed=True)}"
+    )
+    print(f"        Calib: T={_fmt_float_param(params.get('T'))}")
+
+
+def _parameter_impact_row(
+    league: str,
+    y_true: np.ndarray,
+    tuned_probs: np.ndarray,
+    baseline_probs: np.ndarray,
+    params: dict | None,
+) -> dict:
+    tuned_ll = float(log_loss(y_true, tuned_probs, labels=[0, 1, 2]))
+    baseline_ll = float(log_loss(y_true, baseline_probs, labels=[0, 1, 2]))
+    return {
+        "league": league,
+        "matches": int(len(y_true)),
+        "tuned_logloss": tuned_ll,
+        "baseline_logloss": baseline_ll,
+        "delta_logloss": tuned_ll - baseline_ll,
+        "avg_abs_prob_diff": float(np.mean(np.abs(tuned_probs - baseline_probs))),
+        "params": None if params is None else {key: params.get(key) for key in PARAMETER_IMPACT_BASELINE},
+    }
+
+
+def _effective_blend_weights(blend_cfg: dict) -> dict:
+    raw_weights = blend_cfg.get("weights", {})
+    active_names = ["base", "market", "xgb"]
+    if blend_cfg.get("mlp_allowed", True):
+        active_names.append("mlp")
+
+    total = sum(float(raw_weights.get(name, 0.0)) for name in active_names)
+    if total <= 0:
+        return {name: 1.0 if name == "xgb" else 0.0 for name in ["base", "market", "xgb", "mlp"]}
+    return {
+        name: float(raw_weights.get(name, 0.0)) / total if name in active_names else 0.0
+        for name in ["base", "market", "xgb", "mlp"]
+    }
+
+
+def _print_blend_weight_summary(blend_cfg: dict) -> None:
+    effective = _effective_blend_weights(blend_cfg)
+    print("Effective blend weights:", {name: round(weight, 4) for name, weight in effective.items()})
+
+
+def _print_parameter_impact_summary(rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    print("\nLeague parameter impact on base model:")
+    print(f"{'league':<10} {'matches':>7} {'tuned_ll':>9} {'baseline_ll':>11} {'delta':>9} {'avg_prob_diff':>13}")
+    for row in rows:
         print(
-            f"{row['name']:<12} | {row['logloss']:>8.4f} | {row['accuracy'] * 100:>6.2f} | {row['bets']:>5} | "
-            f"{row['hit_rate']:>6.2f} | {row['roi']:>7.2f} | {row['profit']:>8.3f}"
+            f"{row['league']:<10} {row['matches']:>7d} "
+            f"{row['tuned_logloss']:>9.4f} {row['baseline_logloss']:>11.4f} "
+            f"{row['delta_logloss']:>+9.4f} {row['avg_abs_prob_diff']:>13.4f}"
         )
+        if row["params"] is not None and row["league"] != "ALL":
+            print(f"  params: {_league_param_text(row['params'])}")
 
+    baseline = _league_param_text(PARAMETER_IMPACT_BASELINE)
+    print(f"  baseline: {baseline}")
+
+
+def _no_bet_row() -> dict:
+    return {
+        "name": "no_bet",
+        "logloss": 0.0,
+        "accuracy": 0.0,
+        "bets": 0,
+        "hit_rate": 0.0,
+        "roi": 0.0,
+        "profit": 0.0,
+        "avg_odds": 0.0,
+    }
+
+
+def _betting_roi_candidates(rows: list[dict]) -> list[dict]:
+    return [
+        row
+        for row in rows
+        if int(row.get("bets", 0)) > 0 and np.isfinite(float(row.get("roi", np.nan)))
+    ]
+
+
+def _best_betting_roi_row(rows: list[dict]) -> dict:
+    candidates = _betting_roi_candidates(rows)
+    if not candidates:
+        return _no_bet_row()
+    return max(candidates, key=lambda r: r["roi"])
+
+
+def _print_model_selection_summary(rows: list[dict], *, full_report: bool = True):
     best_logloss = min(rows, key=lambda r: r["logloss"])
-    best_roi = max(rows, key=lambda r: r["roi"])
+    best_roi = _best_betting_roi_row(rows)
 
-    print("\nWinner by LogLoss:", best_logloss["name"], f"({best_logloss['logloss']:.4f})")
-    print("Winner by Betting ROI:", best_roi["name"], f"({best_roi['roi']:.2f}%)")
+    if full_report:
+        print("\n" + "=" * 70)
+        print("=== MODEL SELECTION SUMMARY ===")
+        print("=" * 70)
+
+        print(
+            f"{'Model':<12} | {'LogLoss':>8} | {'Acc%':>6} | {'Bets':>5} | {'Hit%':>6} | {'ROI%':>7} | {'Profit':>8}"
+        )
+        print("-" * 70)
+        for row in sorted(rows, key=lambda r: (r["logloss"], -r["roi"])):
+            print(
+                f"{row['name']:<12} | {row['logloss']:>8.4f} | {row['accuracy'] * 100:>6.2f} | {row['bets']:>5} | "
+                f"{row['hit_rate']:>6.2f} | {row['roi']:>7.2f} | {row['profit']:>8.3f}"
+            )
+
+        print("\nWinner by LogLoss:", best_logloss["name"], f"({best_logloss['logloss']:.4f})")
+        if best_roi["name"] == "no_bet":
+            print("Best Betting ROI among models with bets: none (no bets placed)")
+        else:
+            print("Best Betting ROI among models with bets:", best_roi["name"], f"({best_roi['roi']:.2f}%)")
     return best_logloss, best_roi
 
 
 def _select_recommended_betting_model(rows: list[dict], probability_winner: dict):
     eligible_names = {"market", "logreg", "meta", "ensemble"}
-    eligible = [row for row in rows if row["name"] in eligible_names and np.isfinite(row["logloss"])]
+    eligible = [
+        row
+        for row in _betting_roi_candidates(rows)
+        if row["name"] in eligible_names and np.isfinite(row["logloss"])
+    ]
     if not eligible:
-        return probability_winner, "fallback_to_probability_winner"
+        return _no_bet_row(), "no_eligible_model_with_bets"
 
     best_roi = max(eligible, key=lambda r: r["roi"])
     if best_roi["roi"] <= 0:
-        return probability_winner, "no_positive_roi_among_stable_candidates"
+        return _no_bet_row(), "no_positive_roi_among_models_with_bets"
 
     logloss_gap = best_roi["logloss"] - probability_winner["logloss"]
     if logloss_gap > 0.01:
-        return probability_winner, "positive_roi_candidate_failed_logloss_guard"
+        return _no_bet_row(), "positive_roi_candidate_failed_logloss_guard"
     return best_roi, "positive_roi_stable_candidate"
 
 
@@ -206,9 +395,12 @@ def _write_final_summary(config: ExperimentConfig, selection_rows: list[dict], a
         "market_plus_context",
         "market_plus_understat_xg",
         "market_context_plus_understat_xg",
+        "market_plus_external_context",
+        "market_context_plus_external_context",
         "core_18",
         "no_market",
         "no_understat_xg",
+        "no_external_context",
     }
     final_ablation_rows = []
     for row in ablation_rows:
@@ -236,6 +428,140 @@ def _print_feature_ablation_summary(rows: list[dict]):
         )
 
 
+def _coverage_row(rows: list[dict], split: str, data_group: str) -> dict | None:
+    for row in rows:
+        if row.get("split") == split and row.get("data_group") == data_group:
+            return row
+    return None
+
+
+def _coverage_text(rows: list[dict], split: str, data_group: str) -> str:
+    row = _coverage_row(rows, split, data_group)
+    if row is None:
+        return "n/a"
+    return f"{int(row['available_rows'])}/{int(row['matches'])} ({float(row['coverage']):.1f}%)"
+
+
+def _coverage_warning(rows: list[dict], split: str, data_group: str, *, min_pct: float) -> str:
+    row = _coverage_row(rows, split, data_group)
+    if row is None:
+        return "missing"
+    coverage = float(row["coverage"])
+    if coverage <= 0:
+        return "missing"
+    if coverage < min_pct:
+        return "too sparse"
+    return "usable"
+
+
+def _print_compact_model_table(rows: list[dict]) -> None:
+    print("\nModel quality on test set:")
+    print(f"{'model':<10} {'logloss':>8} {'vs_market':>10} {'acc%':>7} {'bets':>6} {'roi%':>8}")
+    market = next((row for row in rows if row["name"] == "market"), min(rows, key=lambda r: r["logloss"]))
+    for row in sorted(rows, key=lambda item: item["logloss"]):
+        delta = row["logloss"] - market["logloss"]
+        print(
+            f"{row['name']:<10} {row['logloss']:>8.4f} {delta:>+10.4f} "
+            f"{row['accuracy'] * 100:>7.2f} {row['bets']:>6d} {row['roi']:>8.2f}"
+        )
+
+
+def _best_ablation(rows: list[dict], model: str) -> dict | None:
+    candidates = [row for row in rows if row["model"] == model]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda row: row["logloss"])
+
+
+def _feature_set_row(rows: list[dict], model: str, feature_set: str) -> dict | None:
+    for row in rows:
+        if row["model"] == model and row["feature_set"] == feature_set:
+            return row
+    return None
+
+
+def _print_external_context_note(ablation_rows: list[dict], data_audit_rows: list[dict]) -> None:
+    print("\nExternal data status:")
+    for data_group in ("injuries", "confirmed_lineups", "weather"):
+        print(
+            f"  {data_group:<17} validation {_coverage_text(data_audit_rows, 'validation', data_group):<18} "
+            f"test {_coverage_text(data_audit_rows, 'test', data_group):<18} "
+            f"status={_coverage_warning(data_audit_rows, 'test', data_group, min_pct=20.0)}"
+        )
+
+    market_only = _feature_set_row(ablation_rows, "mlp", "market_only")
+    market_external = _feature_set_row(ablation_rows, "mlp", "market_plus_external_context")
+    if market_only and market_external:
+        delta = market_external["logloss"] - market_only["logloss"]
+        verdict = "better" if delta < -0.001 else "worse/noisy" if delta > 0.001 else "neutral"
+        print(
+            f"  MLP external-context ablation: {market_external['logloss']:.4f} vs "
+            f"market-only {market_only['logloss']:.4f} ({delta:+.4f}, {verdict})"
+        )
+
+
+def _print_concise_run_summary(
+    *,
+    config: ExperimentConfig,
+    selection_rows: list[dict],
+    ablation_rows: list[dict],
+    data_audit_rows: list[dict],
+    selector_rows: list[dict],
+    parameter_impact_rows: list[dict],
+    blend_cfg: dict,
+    best_logloss: dict,
+    best_roi: dict,
+    recommended_betting: dict,
+    betting_reason: str,
+) -> None:
+    print("\n" + "=" * 70)
+    print("=== RUN SUMMARY ===")
+    print("=" * 70)
+
+    _print_compact_model_table(selection_rows)
+
+    print("\nDecision:")
+    print(f"  Best probability model: {best_logloss['name']} (LogLoss {best_logloss['logloss']:.4f})")
+    if best_roi["name"] == "no_bet":
+        print("  Best betting ROI with actual bets: none")
+    else:
+        print(f"  Best betting ROI with actual bets: {best_roi['name']} ({best_roi['roi']:.2f}%)")
+    print(f"  Recommended betting action: {recommended_betting['name']} ({betting_reason})")
+
+    _print_blend_weight_summary(blend_cfg)
+    _print_parameter_impact_summary(parameter_impact_rows)
+
+    _print_external_context_note(ablation_rows, data_audit_rows)
+
+    xgb_best = _best_ablation(ablation_rows, "xgb")
+    mlp_best = _best_ablation(ablation_rows, "mlp")
+    if xgb_best or mlp_best:
+        print("\nFeature-set check:")
+        if xgb_best:
+            print(f"  Best XGB feature set: {xgb_best['feature_set']} (LogLoss {xgb_best['logloss']:.4f})")
+        if mlp_best:
+            print(f"  Best MLP feature set: {mlp_best['feature_set']} (LogLoss {mlp_best['logloss']:.4f})")
+
+    robust_positive = [
+        row for row in selector_rows
+        if row.get("selector_status") == "validation_locked_positive_fold_roi"
+        and float(row.get("test_roi", 0.0)) > 0.0
+        and int(row.get("test_bets", 0)) >= 50
+    ]
+    print("\nBetting robustness:")
+    if robust_positive:
+        best = max(robust_positive, key=lambda row: row["test_roi"])
+        print(f"  Robust positive candidate: {best['model']} test ROI {best['test_roi']:.2f}% over {best['test_bets']} bets")
+    else:
+        print("  No robust positive test strategy found.")
+
+    print("\nDetailed CSV reports written:")
+    print(f"  Model summary: {config.final_model_summary_file}")
+    print(f"  Data coverage: {config.final_data_enrichment_file}")
+    print(f"  Betting robustness: {config.final_betting_robustness_file}")
+    print("  Use --full-report to print the long diagnostic tables in the terminal.")
+
+
 def _ablation_row(model_name: str, feature_set: str, probs: np.ndarray, y_true: np.ndarray):
     return {
         "model": model_name,
@@ -247,7 +573,8 @@ def _ablation_row(model_name: str, feature_set: str, probs: np.ndarray, y_true: 
 
 def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     compatible_cache = config.use_cached_artifacts and _cached_artifacts_are_compatible(config)
-    cached_params = load_json_if_exists(config.params_file) if config.use_cached_artifacts and not config.force_retune_leagues else None
+    can_load_param_cache = compatible_cache or config.allow_partial_param_cache
+    cached_params = load_json_if_exists(config.params_file) if config.use_cached_artifacts and can_load_param_cache and not config.force_retune_leagues else None
     cached_meta = load_json_if_exists(config.meta_file) if compatible_cache and not config.force_retune_meta else None
     cached_mlp = load_json_if_exists(config.mlp_meta_file) if compatible_cache and not config.force_retune_mlp else None
     cached_blend = load_json_if_exists(config.blend_file) if compatible_cache and not config.force_retune_blend else None
@@ -259,21 +586,19 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     all_X_test, all_y_test = [], []
     all_v_info = []
     all_t_probs_model, all_t_mkt_fixed, all_t_raw_odds, all_t_info = [], [], [], []
+    all_t_param_baseline_probs = []
+    parameter_impact_rows = []
     per_league_test = {}
 
     for league in config.leagues:
-        print("\n" + "=" * 50)
-        print(f"=== Processing Data: {league.upper()} ===")
-        print("=" * 50)
+        _print_league_run_header(league)
         df_all = load_league_data(league).sort_values("date").reset_index(drop=True)
         df = df_all[df_all["is_played"] == True].copy().reset_index(drop=True)
         if df.empty:
             continue
 
-        train_fit = df[df["date"] < config.train_cut].copy()
-        val = df[(df["date"] >= config.train_cut) & (df["date"] < config.test_cut)].copy()
-        test = df[df["date"] >= config.test_cut].copy()
-        print(f"Train_fit: {len(train_fit)}, Validation: {len(val)}, Test: {len(test)}")
+        train_fit, val, test = _split_played_periods(df, config)
+        _print_split_counts(train_fit, val, test)
         if len(train_fit) == 0 or len(val) == 0 or len(test) == 0:
             continue
 
@@ -281,8 +606,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
 
         if league in league_best_params and not config.force_retune_leagues:
             params = league_best_params[league]
-            print("\n--- Using cached params ---")
-            print(f"K={params['K']}, ha={params['ha']}, beta={params['beta']}, decay={params['decay']}, rho={params['rho']}, T={params['T']}")
+            _print_league_params(params, source="cached")
         else:
             params = tune_league_params(
                 base_train,
@@ -290,6 +614,9 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
                 df[df["date"] < config.train_cut].copy(),
             )
             league_best_params[league] = params
+            save_json(config.params_file, league_best_params)
+            print(f"Saved tuned league params checkpoint to: {config.params_file}")
+            _print_league_params(params, source="tuned")
 
         val_early, val_late = time_split_val(val)
         ve_probs_raw, ve_y, ve_mkt, ve_aux, _ = streaming_block_probs_home_away(val_early, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
@@ -316,6 +643,30 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         t_probs_model = temperature_scale_probs(t_probs_raw, params["T"])
         t_mkt_fixed = ensure_market_probs(t_probs_model, t_mkt)
 
+        if config.print_parameter_impact:
+            baseline_raw, baseline_y, _, _, _ = streaming_block_probs_home_away(
+                test,
+                df,
+                PARAMETER_IMPACT_BASELINE["beta"],
+                PARAMETER_IMPACT_BASELINE["rho"],
+                PARAMETER_IMPACT_BASELINE["decay"],
+                PARAMETER_IMPACT_BASELINE["K"],
+                PARAMETER_IMPACT_BASELINE["ha"],
+            )
+            baseline_probs = temperature_scale_probs(baseline_raw, PARAMETER_IMPACT_BASELINE["T"])
+            if not np.array_equal(np.array(t_y, dtype=int), np.array(baseline_y, dtype=int)):
+                raise ValueError(f"Parameter impact row alignment failed for {league}")
+            parameter_impact_rows.append(
+                _parameter_impact_row(
+                    league,
+                    np.array(t_y, dtype=int),
+                    np.array(t_probs_model, dtype=float),
+                    np.array(baseline_probs, dtype=float),
+                    params,
+                )
+            )
+            all_t_param_baseline_probs.extend(baseline_probs)
+
         all_X_test.extend(build_meta_features(t_probs_model, t_mkt_fixed, t_aux))
         all_y_test.extend(t_y)
         all_t_probs_model.extend(t_probs_model)
@@ -336,6 +687,16 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     t_probs_model_arr, t_mkt_fixed_arr = np.array(all_t_probs_model), np.array(all_t_mkt_fixed)
     late_raw_odds_arr = np.array(all_late_raw_odds)
     raw_odds_arr = np.array(all_t_raw_odds)
+    if config.print_parameter_impact and len(all_t_param_baseline_probs) == len(y_test_arr):
+        parameter_impact_rows.append(
+            _parameter_impact_row(
+                "ALL",
+                y_test_arr,
+                t_probs_model_arr,
+                np.array(all_t_param_baseline_probs, dtype=float),
+                None,
+            )
+        )
 
     threshold = 0.05
 
@@ -349,11 +710,18 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     CORE_PLUS_STATS_COLS = feature_indices(core_feature_names + LOCAL_STATS_FEATURE_COLUMNS)
     CORE_PLUS_NEW_LOCAL_COLS = feature_indices(core_feature_names + NEW_LOCAL_FEATURE_COLUMNS)
     CORE_PLUS_UNDERSTAT_XG_COLS = feature_indices(core_feature_names + UNDERSTAT_XG_FEATURE_COLUMNS)
+    CORE_PLUS_EXTERNAL_CONTEXT_COLS = feature_indices(core_feature_names + EXTERNAL_CONTEXT_FEATURE_COLUMNS)
     MARKET_PLUS_UNDERSTAT_XG_COLS = feature_indices([
         "market_logit_home",
         "market_logit_draw",
         "market_logit_away",
         *UNDERSTAT_XG_FEATURE_COLUMNS,
+    ])
+    MARKET_PLUS_EXTERNAL_CONTEXT_COLS = feature_indices([
+        "market_logit_home",
+        "market_logit_draw",
+        "market_logit_away",
+        *EXTERNAL_CONTEXT_FEATURE_COLUMNS,
     ])
     MARKET_CONTEXT_PLUS_UNDERSTAT_XG_COLS = feature_indices([
         "market_logit_home",
@@ -362,11 +730,19 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         *MARKET_CONTEXT_FEATURE_COLUMNS,
         *UNDERSTAT_XG_FEATURE_COLUMNS,
     ])
+    MARKET_CONTEXT_PLUS_EXTERNAL_CONTEXT_COLS = feature_indices([
+        "market_logit_home",
+        "market_logit_draw",
+        "market_logit_away",
+        *MARKET_CONTEXT_FEATURE_COLUMNS,
+        *EXTERNAL_CONTEXT_FEATURE_COLUMNS,
+    ])
     NO_NEW_LOCAL_FEATURES_COLS = [i for i, col in enumerate(FEATURE_COLUMNS) if col not in NEW_LOCAL_FEATURE_COLUMNS]
     NO_NEW_DATA_FEATURES_COLS = [i for i, col in enumerate(FEATURE_COLUMNS) if col not in NEW_DATA_FEATURE_COLUMNS]
     NO_NEW_LOCAL_STATS_COLS = [i for i, col in enumerate(FEATURE_COLUMNS) if col not in LOCAL_STATS_FEATURE_COLUMNS]
     NO_ODDS_MOVEMENT_COLS = [i for i, col in enumerate(FEATURE_COLUMNS) if col not in MARKET_CONTEXT_FEATURE_COLUMNS]
     NO_UNDERSTAT_XG_COLS = [i for i, col in enumerate(FEATURE_COLUMNS) if col not in UNDERSTAT_XG_FEATURE_COLUMNS]
+    NO_EXTERNAL_CONTEXT_COLS = [i for i, col in enumerate(FEATURE_COLUMNS) if col not in EXTERNAL_CONTEXT_FEATURE_COLUMNS]
     market_feature_names = {
         "market_logit_home",
         "market_logit_draw",
@@ -400,11 +776,15 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         "core_plus_stats": CORE_PLUS_STATS_COLS,
         "core_plus_new_local": CORE_PLUS_NEW_LOCAL_COLS,
         "core_plus_understat_xg": CORE_PLUS_UNDERSTAT_XG_COLS,
+        "core_plus_external_context": CORE_PLUS_EXTERNAL_CONTEXT_COLS,
         "market_plus_understat_xg": MARKET_PLUS_UNDERSTAT_XG_COLS,
+        "market_plus_external_context": MARKET_PLUS_EXTERNAL_CONTEXT_COLS,
         "market_context_plus_understat_xg": MARKET_CONTEXT_PLUS_UNDERSTAT_XG_COLS,
+        "market_context_plus_external_context": MARKET_CONTEXT_PLUS_EXTERNAL_CONTEXT_COLS,
         "no_new_local_stats": NO_NEW_LOCAL_STATS_COLS,
         "no_odds_context": NO_ODDS_MOVEMENT_COLS,
         "no_understat_xg": NO_UNDERSTAT_XG_COLS,
+        "no_external_context": NO_EXTERNAL_CONTEXT_COLS,
     }
 
     X_early_nm = X_early_arr[:, NO_MARKET_COLS]
@@ -489,10 +869,14 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         "default_plus_rolling_stats": sorted(set(MLP_DEFAULT_COLS + LOCAL_STATS_COLS)),
         "default_plus_new_local": sorted(set(MLP_DEFAULT_COLS + NEW_LOCAL_COLS)),
         "default_plus_understat_xg": sorted(set(MLP_DEFAULT_COLS + feature_indices(UNDERSTAT_XG_FEATURE_COLUMNS))),
+        "default_plus_team_news": sorted(set(MLP_DEFAULT_COLS + feature_indices(TEAM_NEWS_FEATURE_COLUMNS))),
+        "default_plus_weather": sorted(set(MLP_DEFAULT_COLS + feature_indices(WEATHER_FEATURE_COLUMNS))),
+        "default_plus_external_context": sorted(set(MLP_DEFAULT_COLS + feature_indices(EXTERNAL_CONTEXT_FEATURE_COLUMNS))),
         "core_18": CORE_COLS,
         "core_plus_odds_context": CORE_PLUS_ODDS_COLS,
         "core_plus_rolling_stats": CORE_PLUS_STATS_COLS,
         "core_plus_understat_xg": CORE_PLUS_UNDERSTAT_XG_COLS,
+        "core_plus_external_context": CORE_PLUS_EXTERNAL_CONTEXT_COLS,
         "all_features": all_cols,
     }
 
@@ -619,6 +1003,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         save_json(config.blend_file, blend_cfg)
         print(f"Saved blend weights to: {config.blend_file}")
     print(f"Blend weights: {blend_cfg['weights']}")
+    _print_blend_weight_summary(blend_cfg)
     print(f"Late VAL LogLoss: {round(blend_cfg['late_val_logloss'], 4)}")
     late_probs_blend = blend_probabilities(
         blend_cfg["weights"],
@@ -644,9 +1029,10 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             "mlp": t_probs_mlp if blend_cfg.get("mlp_allowed", mlp_allowed_in_blend) else None,
         },
     )
-    print("\n" + "=" * 50)
-    print("=== QUICK NO-MARKET ABLATION ===")
-    print("=" * 50)
+    if config.print_full_reports:
+        print("\n" + "=" * 50)
+        print("=== QUICK NO-MARKET ABLATION ===")
+        print("=" * 50)
 
     # Reuse current best hyperparams, but retrain on no-market features only
     meta_nm = fit_xgb_model(X_val_nm, y_val_arr, best_meta_cfg)
@@ -657,28 +1043,42 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     t_probs_mlp_nm_raw = mlp_nm.predict_proba(X_test_nm)
     t_probs_mlp_nm = temperature_scale_probs(t_probs_mlp_nm_raw, float(best_mlp_cfg["temperature"]))
 
-    print_prob_report("META NO-MARKET", t_probs_meta_nm, y_test_arr)
-    print_prob_report("MLP NO-MARKET", t_probs_mlp_nm, y_test_arr)
+    if config.print_full_reports:
+        print_prob_report("META NO-MARKET", t_probs_meta_nm, y_test_arr)
+        print_prob_report("MLP NO-MARKET", t_probs_mlp_nm, y_test_arr)
 
-    print("\n--- Betting simulation: no-market ablation ---")
+    if config.print_full_reports:
+        print("\n--- Betting simulation: no-market ablation ---")
     bets_nm_xgb, wins_nm_xgb, profit_nm_xgb, roi_nm_xgb, avg_odds_nm_xgb = simulate_value_betting(
-        t_probs_meta_nm, raw_odds_arr, y_test_arr, edge_threshold=threshold, match_info=None
+        t_probs_meta_nm,
+        raw_odds_arr,
+        y_test_arr,
+        edge_threshold=threshold,
+        match_info=None,
+        verbose=config.print_full_reports,
     )
-    print(f"META NO-MARKET ROI: {round(roi_nm_xgb, 2)}% | Bets: {bets_nm_xgb}")
+    if config.print_full_reports:
+        print(f"META NO-MARKET ROI: {round(roi_nm_xgb, 2)}% | Bets: {bets_nm_xgb}")
 
     bets_nm_mlp, wins_nm_mlp, profit_nm_mlp, roi_nm_mlp, avg_odds_nm_mlp = simulate_value_betting(
-        t_probs_mlp_nm, raw_odds_arr, y_test_arr, edge_threshold=threshold, match_info=None
+        t_probs_mlp_nm,
+        raw_odds_arr,
+        y_test_arr,
+        edge_threshold=threshold,
+        match_info=None,
+        verbose=config.print_full_reports,
     )
-    print(f"MLP NO-MARKET ROI: {round(roi_nm_mlp, 2)}% | Bets: {bets_nm_mlp}")
+    if config.print_full_reports:
+        print(f"MLP NO-MARKET ROI: {round(roi_nm_mlp, 2)}% | Bets: {bets_nm_mlp}")
 
-    print_prob_report("BASE (Model only, calibrated)", t_probs_model_arr, y_test_arr)
-    print_prob_report("MARKET (odds implied)", t_mkt_fixed_arr, y_test_arr)
-    print_prob_report("META (Market + Model)", t_probs_meta, y_test_arr)
-    print_prob_report("LOGREG (regularized baseline)", t_probs_logreg, y_test_arr)
-    print_prob_report("DEEP LEARNING (MLP, calibrated)", t_probs_mlp, y_test_arr)
-    print_prob_report("ENSEMBLE (XGB + MLP + Market + Base)", t_probs_blend, y_test_arr)
-    print_confusion("ENSEMBLE", t_probs_blend, y_test_arr)
-    print_per_league_test_metrics(list(config.leagues), per_league_test, t_probs_meta, t_probs_mlp, t_probs_blend)
+        print_prob_report("BASE (Model only, calibrated)", t_probs_model_arr, y_test_arr)
+        print_prob_report("MARKET (odds implied)", t_mkt_fixed_arr, y_test_arr)
+        print_prob_report("META (Market + Model)", t_probs_meta, y_test_arr)
+        print_prob_report("LOGREG (regularized baseline)", t_probs_logreg, y_test_arr)
+        print_prob_report("DEEP LEARNING (MLP, calibrated)", t_probs_mlp, y_test_arr)
+        print_prob_report("ENSEMBLE (XGB + MLP + Market + Base)", t_probs_blend, y_test_arr)
+        print_confusion("ENSEMBLE", t_probs_blend, y_test_arr)
+        print_per_league_test_metrics(list(config.leagues), per_league_test, t_probs_meta, t_probs_mlp, t_probs_blend)
 
     ablation_specs = [
         ("all_features", all_cols),
@@ -692,8 +1092,12 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         ("core_plus_stats", CORE_PLUS_STATS_COLS),
         ("core_plus_new_local", CORE_PLUS_NEW_LOCAL_COLS),
         ("core_plus_understat_xg", CORE_PLUS_UNDERSTAT_XG_COLS),
+        ("core_plus_external_context", CORE_PLUS_EXTERNAL_CONTEXT_COLS),
         ("market_plus_understat_xg", MARKET_PLUS_UNDERSTAT_XG_COLS),
+        ("market_plus_external_context", MARKET_PLUS_EXTERNAL_CONTEXT_COLS),
         ("market_context_plus_understat_xg", MARKET_CONTEXT_PLUS_UNDERSTAT_XG_COLS),
+        ("market_context_plus_external_context", MARKET_CONTEXT_PLUS_EXTERNAL_CONTEXT_COLS),
+        ("no_external_context", NO_EXTERNAL_CONTEXT_COLS),
         ("no_market", NO_MARKET_COLS),
         ("no_elo", NO_ELO_COLS),
         ("no_xg", NO_XG_COLS),
@@ -718,7 +1122,8 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         mlp_probs_raw = mlp_ablation.predict_proba(X_test_slice)
         mlp_probs = temperature_scale_probs(mlp_probs_raw, float(best_mlp_cfg["temperature"]))
         ablation_rows.append(_ablation_row("mlp", feature_set_name, mlp_probs, y_test_arr))
-    _print_feature_ablation_summary(ablation_rows)
+    if config.print_full_reports:
+        _print_feature_ablation_summary(ablation_rows)
 
     selection_rows = [
         _model_summary_row("base", t_probs_model_arr, y_test_arr, raw_odds_arr, edge_threshold=threshold),
@@ -728,9 +1133,10 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         _model_summary_row("mlp", t_probs_mlp, y_test_arr, raw_odds_arr, edge_threshold=threshold),
         _model_summary_row("ensemble", t_probs_blend, y_test_arr, raw_odds_arr, edge_threshold=threshold),
     ]
-    best_logloss, best_roi = _print_model_selection_summary(selection_rows)
+    best_logloss, best_roi = _print_model_selection_summary(selection_rows, full_report=config.print_full_reports)
     recommended_betting, betting_reason = _select_recommended_betting_model(selection_rows, best_logloss)
-    print("Recommended betting model:", recommended_betting["name"], f"({betting_reason})")
+    if config.print_full_reports:
+        print("Recommended betting model:", recommended_betting["name"], f"({betting_reason})")
 
     run_ts = datetime.now(UTC).isoformat()
     result_rows = []
@@ -740,6 +1146,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             "experiment_name": config.experiment_name,
             "train_cut": config.train_cut,
             "test_cut": config.test_cut,
+            "test_end": config.test_end,
             "model": row["name"],
             "logloss": round(row["logloss"], 6),
             "accuracy": round(row["accuracy"], 6),
@@ -749,7 +1156,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             "profit": round(row["profit"], 4),
             "avg_odds": round(row["avg_odds"], 4),
             "winner_logloss": int(row["name"] == min(selection_rows, key=lambda r: r["logloss"])["name"]),
-            "winner_roi": int(row["name"] == max(selection_rows, key=lambda r: r["roi"])["name"]),
+            "winner_roi": int(row["name"] == best_roi["name"] and row["bets"] > 0),
         })
     append_rows_to_csv(config.results_csv_file, result_rows)
 
@@ -793,7 +1200,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             "test": y_test_arr,
         },
     )
-    write_validation_selected_betting_reports(
+    selector_rows = write_validation_selected_betting_reports(
         config,
         run_ts,
         late_validation_strategy_probs,
@@ -821,7 +1228,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             "test": all_t_info,
         },
     )
-    write_data_enrichment_audit(
+    data_audit_rows = write_data_enrichment_audit(
         config,
         run_ts,
         {
@@ -852,23 +1259,38 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         edge_threshold=threshold,
     )
 
-    print("\n--- Betting simulation - All Top 5 Leagues ---")
     bets, wins, profit, roi, avg_odds = simulate_value_betting(
         t_probs_blend,
         raw_odds_arr,
         y_test_arr,
         edge_threshold=threshold,
         match_info=all_t_info if config.detailed_betting_log else None,
+        verbose=config.print_full_reports,
     )
-    print(f"Ensemble Strategy (Edge > {threshold*100}%):")
-    print(f"Total Bets Placed: {bets} (out of {len(X_test_arr)} matches)")
-    if bets > 0:
-        print(f"Won Bets: {wins} ({round(wins / bets * 100, 1)}% Hit Rate)")
-        print(f"Average Odds Played: {round(avg_odds, 2)}")
-    print(f"Net Profit: {round(profit, 2)} units")
-    print(f"ROI: {round(roi, 2)}%")
+    if config.print_full_reports:
+        print("\n--- Betting simulation - All Top 5 Leagues ---")
+        print(f"Ensemble Strategy (Edge > {threshold*100}%):")
+        print(f"Total Bets Placed: {bets} (out of {len(X_test_arr)} matches)")
+        if bets > 0:
+            print(f"Won Bets: {wins} ({round(wins / bets * 100, 1)}% Hit Rate)")
+            print(f"Average Odds Played: {round(avg_odds, 2)}")
+        print(f"Net Profit: {round(profit, 2)} units")
+        print(f"ROI: {round(roi, 2)}%")
+    else:
+        _print_concise_run_summary(
+            config=config,
+            selection_rows=selection_rows,
+            ablation_rows=ablation_rows,
+            data_audit_rows=data_audit_rows,
+            selector_rows=selector_rows,
+            parameter_impact_rows=parameter_impact_rows,
+            blend_cfg=blend_cfg,
+            best_logloss=best_logloss,
+            best_roi=best_roi,
+            recommended_betting=recommended_betting,
+            betting_reason=betting_reason,
+        )
 
-        
     if config.print_verbose_audits:
         print_alignment_audit(
             probs=t_probs_blend,
@@ -919,6 +1341,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     save_manifest(config.manifest_file, {
         "pipeline_version": PIPELINE_VERSION,
         "config": config.as_manifest(),
+        "data_fingerprint": _data_fingerprint(),
         "feature_columns": FEATURE_COLUMNS,
         "n_features": len(FEATURE_COLUMNS),
         "xgb": best_meta_cfg,
@@ -931,6 +1354,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         "mlp_feature_columns": mlp_feature_columns,
         "mlp_n_features": len(mlp_feature_columns),
         "blend": blend_cfg,
+        "parameter_impact": parameter_impact_rows,
         "selection_summary": {
             "winner_by_logloss": best_logloss["name"],
             "winner_by_logloss_value": round(best_logloss["logloss"], 6),
@@ -942,16 +1366,17 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         },
     })
 
-    generate_upcoming_matchday_picks(
-        config.leagues,
-        league_best_params,
-        meta_final,
-        best_meta_cfg,
-        mlp_model,
-        best_mlp_cfg,
-        max_window_days=config.max_upcoming_window_days,
-        pick_model=best_logloss["name"],
-    )
+    if config.generate_upcoming_picks:
+        generate_upcoming_matchday_picks(
+            config.leagues,
+            league_best_params,
+            meta_final,
+            best_meta_cfg,
+            mlp_model,
+            best_mlp_cfg,
+            max_window_days=config.max_upcoming_window_days,
+            pick_model=best_logloss["name"],
+        )
     return {
         "league_best_params": league_best_params,
         "xgb_cfg": best_meta_cfg,

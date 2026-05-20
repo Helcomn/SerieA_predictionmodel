@@ -1,3 +1,4 @@
+import csv
 import io
 import tempfile
 import unittest
@@ -7,13 +8,42 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.artifact_store import append_rows_to_csv
+import src.update_api_football_context as api_football_context
 import src.data_processing as data_processing
+from update_team_news import _backtest_window
+from src.cli.backtest_season_cli import build_backtest_config, season_window
+from src.config import ExperimentConfig
 from src.evaluation import betting_records, simulate_value_betting
-from src.feature_builder import ensure_market_probs, market_probs_from_odds_row
+from src.external_context import add_external_match_context
+from src.feature_builder import ensure_market_probs, feature_indices, market_probs_from_odds_row
+from src.models.base import _validation_rows_with_elo
 from src.models.meta import blend_probabilities
 from src.state_builder import EXTRA_AUX_LEN, compute_pre_match_extra_features
 from src.team_names import normalize_team_name
+from src.trainer import (
+    _best_betting_roi_row,
+    _effective_blend_weights,
+    _parameter_impact_row,
+    _select_recommended_betting_model,
+    _split_played_periods,
+)
 from src.understat_data import add_understat_xg
+from src.update_api_football_context import (
+    injury_fields,
+    lineup_fields,
+    match_api_fixtures,
+    merge_match_context as merge_api_match_context,
+    skip_existing_context_rows,
+    team_match_key,
+)
+from src.update_weather_context import (
+    _parse_kickoff_hour,
+    load_team_locations,
+    matches_with_locations,
+    merge_match_context,
+    write_team_location_template,
+)
 
 
 class FeatureBuilderTests(unittest.TestCase):
@@ -79,6 +109,384 @@ class TeamNameTests(unittest.TestCase):
 
         self.assertIn("Barcelona", set(loaded["away_team"]))
         self.assertNotIn("FC Barcelona", set(loaded["away_team"]))
+
+
+class SeasonBacktestTests(unittest.TestCase):
+    def test_season_window_keeps_validation_before_target_season(self):
+        self.assertEqual(
+            season_window(2024),
+            ("2023-07-01", "2024-07-01", "2025-07-01"),
+        )
+
+        config = build_backtest_config(2024)
+        self.assertEqual(config.experiment_name, "season_backtest_2024_2025")
+        self.assertEqual(config.train_cut, "2023-07-01")
+        self.assertEqual(config.test_cut, "2024-07-01")
+        self.assertEqual(config.test_end, "2025-07-01")
+        self.assertTrue(config.allow_partial_param_cache)
+        self.assertTrue(config.print_parameter_impact)
+        self.assertFalse(config.generate_upcoming_picks)
+
+    def test_test_end_caps_backtest_to_exact_target_season(self):
+        df = pd.DataFrame({
+            "date": pd.to_datetime([
+                "2023-06-30",
+                "2023-07-01",
+                "2024-06-30",
+                "2024-07-01",
+                "2025-06-30",
+                "2025-07-01",
+            ])
+        })
+        config = ExperimentConfig(
+            train_cut="2023-07-01",
+            test_cut="2024-07-01",
+            test_end="2025-07-01",
+        )
+
+        train_fit, val, test = _split_played_periods(df, config)
+
+        self.assertEqual(train_fit["date"].dt.strftime("%Y-%m-%d").tolist(), ["2023-06-30"])
+        self.assertEqual(val["date"].dt.strftime("%Y-%m-%d").tolist(), ["2023-07-01", "2024-06-30"])
+        self.assertEqual(test["date"].dt.strftime("%Y-%m-%d").tolist(), ["2024-07-01", "2025-06-30"])
+
+    def test_team_news_backtest_window_defaults_to_test_period(self):
+        self.assertEqual(_backtest_window(2023, "test"), (pd.Timestamp("2023-07-01").date(), pd.Timestamp("2024-06-30").date()))
+        self.assertEqual(_backtest_window(2023, "validation"), (pd.Timestamp("2022-07-01").date(), pd.Timestamp("2023-06-30").date()))
+        self.assertEqual(_backtest_window(2023, "both"), (pd.Timestamp("2022-07-01").date(), pd.Timestamp("2024-06-30").date()))
+
+
+class ArtifactStoreTests(unittest.TestCase):
+    def test_append_rows_to_csv_migrates_existing_header_for_new_columns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "experiment_results.csv"
+            path.write_text(
+                "run_ts_utc,experiment_name,train_cut,test_cut,model,logloss\n"
+                "2026-01-01T00:00:00+00:00,old,2023-07-01,2024-07-01,base,0.9\n",
+                encoding="utf-8",
+            )
+
+            append_rows_to_csv(path, [{
+                "run_ts_utc": "2026-01-02T00:00:00+00:00",
+                "experiment_name": "new",
+                "train_cut": "2023-07-01",
+                "test_cut": "2024-07-01",
+                "test_end": "2025-07-01",
+                "model": "meta",
+                "logloss": 0.8,
+            }])
+
+            with open(path, "r", encoding="utf-8", newline="") as f:
+                rows = list(csv.DictReader(f))
+
+        self.assertEqual(
+            list(rows[0].keys()),
+            ["run_ts_utc", "experiment_name", "train_cut", "test_cut", "test_end", "model", "logloss"],
+        )
+        self.assertEqual(rows[0]["test_end"], "")
+        self.assertEqual(rows[0]["model"], "base")
+        self.assertEqual(rows[1]["test_end"], "2025-07-01")
+        self.assertEqual(rows[1]["model"], "meta")
+
+
+class ModelSelectionTests(unittest.TestCase):
+    def test_effective_blend_weights_normalize_active_models(self):
+        effective = _effective_blend_weights({
+            "weights": {"base": 0.0, "market": 0.05, "xgb": 0.0, "mlp": 0.5},
+            "mlp_allowed": False,
+        })
+
+        self.assertEqual(effective["market"], 1.0)
+        self.assertEqual(effective["mlp"], 0.0)
+
+    def test_parameter_impact_row_quantifies_probability_change(self):
+        y = np.array([0, 1, 2])
+        tuned = np.array([
+            [0.70, 0.20, 0.10],
+            [0.20, 0.60, 0.20],
+            [0.10, 0.20, 0.70],
+        ])
+        baseline = np.array([
+            [0.34, 0.33, 0.33],
+            [0.34, 0.33, 0.33],
+            [0.34, 0.33, 0.33],
+        ])
+
+        row = _parameter_impact_row("test", y, tuned, baseline, None)
+
+        self.assertLess(row["tuned_logloss"], row["baseline_logloss"])
+        self.assertLess(row["delta_logloss"], 0.0)
+        self.assertGreater(row["avg_abs_prob_diff"], 0.0)
+
+    def test_no_bet_market_does_not_win_betting_roi_or_recommendation(self):
+        rows = [
+            {
+                "name": "market",
+                "logloss": 0.95,
+                "accuracy": 0.56,
+                "bets": 0,
+                "hit_rate": 0.0,
+                "roi": 0.0,
+                "profit": 0.0,
+                "avg_odds": 0.0,
+            },
+            {
+                "name": "meta",
+                "logloss": 0.96,
+                "accuracy": 0.55,
+                "bets": 100,
+                "hit_rate": 40.0,
+                "roi": -7.0,
+                "profit": -1.0,
+                "avg_odds": 3.0,
+            },
+            {
+                "name": "ensemble",
+                "logloss": 0.953,
+                "accuracy": 0.56,
+                "bets": 13,
+                "hit_rate": 15.0,
+                "roi": -2.5,
+                "profit": -0.1,
+                "avg_odds": 8.0,
+            },
+        ]
+
+        self.assertEqual(_best_betting_roi_row(rows)["name"], "ensemble")
+        recommended, reason = _select_recommended_betting_model(rows, rows[0])
+        self.assertEqual(recommended["name"], "no_bet")
+        self.assertEqual(reason, "no_positive_roi_among_models_with_bets")
+
+
+class WeatherContextTests(unittest.TestCase):
+    def test_weather_location_merge_normalizes_home_team_names(self):
+        matches = pd.DataFrame([{
+            "date": "2024-08-16",
+            "kickoff_hour": 20,
+            "league": "england",
+            "home_team": "Man United",
+            "away_team": "Fulham",
+        }])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "team_locations.csv"
+            pd.DataFrame([{
+                "league": "england",
+                "team": "Man Utd",
+                "latitude": 53.4631,
+                "longitude": -2.2913,
+            }]).to_csv(path, index=False)
+
+            locations = load_team_locations(path)
+
+        located, missing = matches_with_locations(matches, locations)
+
+        self.assertTrue(missing.empty)
+        self.assertAlmostEqual(float(located.loc[0, "latitude"]), 53.4631)
+        self.assertAlmostEqual(float(located.loc[0, "longitude"]), -2.2913)
+
+    def test_weather_context_merge_preserves_existing_team_news(self):
+        existing = pd.DataFrame([{
+            "date": "2024-08-16",
+            "league": "england",
+            "home_team": "Man United",
+            "away_team": "Fulham",
+            "lineup_available": 1,
+            "home_lineup_strength": 0.94,
+        }])
+        weather = pd.DataFrame([{
+            "date": "2024-08-16",
+            "league": "england",
+            "home_team": "Man United",
+            "away_team": "Fulham",
+            "weather_available": 1,
+            "temperature_c": 18.5,
+            "wind_kph": 12.0,
+            "precipitation_mm": 0.4,
+        }])
+
+        merged = merge_match_context(existing, weather)
+
+        self.assertEqual(float(merged.loc[0, "lineup_available"]), 1.0)
+        self.assertAlmostEqual(float(merged.loc[0, "home_lineup_strength"]), 0.94)
+        self.assertEqual(float(merged.loc[0, "weather_available"]), 1.0)
+        self.assertAlmostEqual(float(merged.loc[0, "temperature_c"]), 18.5)
+
+    def test_kickoff_hour_defaults_safely(self):
+        self.assertEqual(_parse_kickoff_hour("20:45"), 20)
+        self.assertEqual(_parse_kickoff_hour("bad"), 15)
+        self.assertEqual(_parse_kickoff_hour(np.nan), 15)
+
+    def test_write_team_location_template_uses_raw_match_teams(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "team_locations.csv"
+            template = write_team_location_template(
+                output_file=path,
+                start_season=2023,
+                end_season=2023,
+            )
+
+        self.assertTrue({"league", "team", "latitude", "longitude"}.issubset(template.columns))
+        self.assertIn("Arsenal", set(template[template["league"] == "england"]["team"]))
+
+
+class ApiFootballContextTests(unittest.TestCase):
+    def test_api_football_team_match_key_handles_common_aliases(self):
+        self.assertEqual(team_match_key("Man United", "england"), team_match_key("Manchester United", "england"))
+        self.assertEqual(team_match_key("Tottenham", "england"), team_match_key("Tottenham Hotspur", "england"))
+        self.assertEqual(team_match_key("Paris Saint-Germain", "france"), team_match_key("Paris SG", "france"))
+
+    def test_api_fixture_matching_accepts_provider_team_names(self):
+        local = pd.DataFrame([{
+            "date": "2026-05-17",
+            "league": "england",
+            "api_season": 2025,
+            "home_team": "Man United",
+            "away_team": "Tottenham",
+            "is_played": False,
+        }])
+        api = pd.DataFrame([{
+            "date": "2026-05-17",
+            "league": "england",
+            "api_fixture_id": 123,
+            "api_home_team": "Manchester United",
+            "api_away_team": "Tottenham Hotspur",
+            "api_home_id": 33,
+            "api_away_id": 47,
+        }])
+
+        matched = match_api_fixtures(local, api)
+
+        self.assertEqual(matched.loc[0, "api_match_status"], "matched")
+        self.assertEqual(int(matched.loc[0, "api_fixture_id"]), 123)
+
+    def test_lineup_and_injury_payloads_become_context_fields(self):
+        lineups = [
+            {"team": {"id": 10}, "startXI": [{"player": {"id": i}} for i in range(11)]},
+            {"team": {"id": 20}, "startXI": [{"player": {"id": i}} for i in range(10)]},
+        ]
+        injuries = [
+            {"team": {"id": 10}, "player": {"id": 1, "reason": "Hamstring Injury"}},
+            {"team": {"id": 20}, "player": {"id": 2, "reason": "Suspended"}},
+            {"team": {"id": 20}, "player": {"id": 2, "reason": "Suspended"}},
+        ]
+
+        lineup = lineup_fields(lineups, home_id=10, away_id=20)
+        injury = injury_fields(injuries, home_id=10, away_id=20)
+
+        self.assertEqual(lineup["lineup_available"], 1.0)
+        self.assertAlmostEqual(lineup["home_lineup_strength"], 1.0)
+        self.assertAlmostEqual(lineup["away_lineup_strength"], 10 / 11)
+        self.assertEqual(injury["home_injury_count"], 1.0)
+        self.assertEqual(injury["away_suspension_count"], 1.0)
+        self.assertEqual(injury["away_absence_count"], 1.0)
+        self.assertEqual(injury["team_news_available"], 1.0)
+
+    def test_empty_injury_payload_marks_known_zero_team_news(self):
+        injury = injury_fields([], home_id=10, away_id=20)
+
+        self.assertEqual(injury["team_news_available"], 1.0)
+        self.assertEqual(injury["home_absence_count"], 0.0)
+        self.assertEqual(injury["away_absence_count"], 0.0)
+
+    def test_api_context_merge_preserves_weather_columns(self):
+        existing = pd.DataFrame([{
+            "date": "2026-05-17",
+            "league": "england",
+            "home_team": "Man United",
+            "away_team": "Tottenham",
+            "weather_available": 1,
+            "temperature_c": 14.5,
+        }])
+        incoming = pd.DataFrame([{
+            "date": "2026-05-17",
+            "league": "england",
+            "home_team": "Man United",
+            "away_team": "Tottenham",
+            "team_news_available": 1,
+            "home_injury_count": 2,
+            "away_suspension_count": 1,
+            "api_football_fixture_id": 123,
+        }])
+
+        merged = merge_api_match_context(existing, incoming)
+
+        self.assertEqual(float(merged.loc[0, "weather_available"]), 1.0)
+        self.assertAlmostEqual(float(merged.loc[0, "temperature_c"]), 14.5)
+        self.assertEqual(float(merged.loc[0, "team_news_available"]), 1.0)
+        self.assertEqual(float(merged.loc[0, "home_injury_count"]), 2.0)
+        self.assertEqual(int(merged.loc[0, "api_football_fixture_id"]), 123)
+
+    def test_api_context_backfill_skips_existing_rows(self):
+        matched = pd.DataFrame([
+            {
+                "date": "2024-08-16",
+                "league": "england",
+                "home_team": "Man United",
+                "away_team": "Fulham",
+                "api_match_status": "matched",
+            },
+            {
+                "date": "2024-08-17",
+                "league": "england",
+                "home_team": "Arsenal",
+                "away_team": "Wolves",
+                "api_match_status": "matched",
+            },
+        ])
+        existing = pd.DataFrame([{
+            "date": "2024-08-16",
+            "league": "england",
+            "home_team": "Man United",
+            "away_team": "Fulham",
+            "api_football_fixture_id": 123,
+        }])
+
+        remaining, skipped = skip_existing_context_rows(matched, existing)
+
+        self.assertEqual(skipped, 1)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining.loc[0, "home_team"], "Arsenal")
+
+    def test_api_client_turns_429_into_rate_limit_state(self):
+        class FakeResponse:
+            status_code = 429
+            text = "Too Many Requests"
+            headers = {"Retry-After": "60"}
+
+            def json(self):
+                return {"errors": {"requests": "rate limit"}}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_get = api_football_context.requests.get
+            try:
+                api_football_context.requests.get = lambda *args, **kwargs: FakeResponse()
+                client = api_football_context.ApiFootballClient(api_key="fake", cache_dir=Path(tmpdir))
+                rows = client.response("/fixtures", {"league": 39, "season": 2024})
+            finally:
+                api_football_context.requests.get = original_get
+
+        self.assertEqual(rows, [])
+        self.assertEqual(len(client.rate_limit_errors), 1)
+        self.assertEqual(client.rate_limit_errors[0]["retry_after"], "60")
+
+
+class BaseTuningTests(unittest.TestCase):
+    def test_validation_elo_rows_do_not_expand_on_duplicate_dates(self):
+        train_fit = pd.DataFrame([
+            {"date": pd.Timestamp("2020-01-01"), "home_team": "A", "away_team": "B", "home_goals": 1, "away_goals": 0},
+            {"date": pd.Timestamp("2020-01-08"), "home_team": "C", "away_team": "D", "home_goals": 0, "away_goals": 0},
+        ])
+        val = pd.DataFrame([
+            {"date": pd.Timestamp("2020-01-08"), "home_team": "A", "away_team": "C", "home_goals": 2, "away_goals": 1},
+            {"date": pd.Timestamp("2020-01-15"), "home_team": "B", "away_team": "D", "home_goals": 1, "away_goals": 3},
+        ])
+
+        val_part = _validation_rows_with_elo(train_fit, val, K=40, home_adv=60)
+
+        self.assertEqual(len(val_part), len(val))
+        self.assertEqual(val_part["home_team"].tolist(), ["A", "B"])
+        self.assertTrue(np.isfinite(val_part[["elo_home", "elo_away"]].to_numpy()).all())
 
 
 class BettingSimulationTests(unittest.TestCase):
@@ -186,6 +594,71 @@ class RollingFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(features[15], 0.57)
         self.assertAlmostEqual(features[16], -0.5)
 
+    def test_pre_match_features_include_external_context(self):
+        row = pd.Series({
+            "home_team": "A",
+            "away_team": "B",
+            "lineup_available": 1,
+            "home_lineup_strength": 0.92,
+            "away_lineup_strength": 0.84,
+            "team_news_available": 1,
+            "home_absence_count": 2,
+            "away_absence_count": 4,
+            "home_injury_count": 1,
+            "away_injury_count": 3,
+            "home_suspension_count": 1,
+            "away_suspension_count": 0,
+            "home_key_absence_count": 1,
+            "away_key_absence_count": 2,
+            "home_manager_change_recent": 0,
+            "away_manager_change_recent": 1,
+            "weather_available": 1,
+            "temperature_c": 8.0,
+            "wind_kph": 30.0,
+            "precipitation_mm": 4.0,
+        })
+
+        features = compute_pre_match_extra_features(row, pd.DataFrame())
+        offset = 6 + 12
+        feature_map = {name: features[idx - offset] for idx, name in zip(feature_indices([
+            "lineup_available",
+            "lineup_strength_diff",
+            "absence_count_diff",
+            "injury_count_diff",
+            "suspension_count_diff",
+            "key_absence_count_diff",
+            "manager_change_recent_diff",
+            "weather_available",
+            "temperature_c",
+            "wind_kph",
+            "precipitation_mm",
+        ]), [
+            "lineup_available",
+            "lineup_strength_diff",
+            "absence_count_diff",
+            "injury_count_diff",
+            "suspension_count_diff",
+            "key_absence_count_diff",
+            "manager_change_recent_diff",
+            "weather_available",
+            "temperature_c",
+            "wind_kph",
+            "precipitation_mm",
+        ])}
+
+        self.assertEqual(len(features), EXTRA_AUX_LEN)
+        self.assertEqual(feature_map["lineup_available"], 1.0)
+        self.assertAlmostEqual(feature_map["lineup_strength_diff"], 0.08)
+        self.assertEqual(feature_map["absence_count_diff"], -2.0)
+        self.assertEqual(feature_map["injury_count_diff"], -2.0)
+        self.assertEqual(feature_map["suspension_count_diff"], 1.0)
+        self.assertEqual(feature_map["key_absence_count_diff"], -1.0)
+        self.assertEqual(feature_map["manager_change_recent_diff"], -1.0)
+        self.assertEqual(feature_map["weather_available"], 1.0)
+        self.assertEqual(feature_map["temperature_c"], 8.0)
+        self.assertEqual(feature_map["wind_kph"], 30.0)
+        self.assertEqual(feature_map["precipitation_mm"], 4.0)
+
     def test_loader_extracts_over_under_25_odds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -244,6 +717,42 @@ class RollingFeatureTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(merged.loc[0, "home_understat_xg"]), 1.7)
         self.assertAlmostEqual(float(merged.loc[0, "away_understat_npxg"]), 0.7)
+
+    def test_external_match_context_join_adds_lineup_weather_team_news(self):
+        base = pd.DataFrame([{
+            "date": pd.Timestamp("2024-08-16"),
+            "home_team": "Man United",
+            "away_team": "Fulham",
+        }])
+        context = pd.DataFrame([{
+            "date": "2024-08-16",
+            "league": "england",
+            "home_team": "Man Utd",
+            "away_team": "Fulham",
+            "lineup_available": 1,
+            "home_lineup_strength": 0.94,
+            "away_lineup_strength": 0.88,
+            "home_injury_count": 2,
+            "away_suspension_count": 1,
+            "home_manager_change_days": 10,
+            "weather_available": 1,
+            "temperature_c": 18.5,
+            "wind_kph": 12.0,
+            "precipitation_mm": 0.4,
+        }])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "match_context.csv"
+            context.to_csv(path, index=False)
+
+            merged = add_external_match_context(base, "england", path=path)
+
+        self.assertEqual(float(merged.loc[0, "lineup_available"]), 1.0)
+        self.assertAlmostEqual(float(merged.loc[0, "home_lineup_strength"]), 0.94)
+        self.assertAlmostEqual(float(merged.loc[0, "away_lineup_strength"]), 0.88)
+        self.assertEqual(float(merged.loc[0, "home_absence_count"]), 2.0)
+        self.assertEqual(float(merged.loc[0, "away_suspension_count"]), 1.0)
+        self.assertEqual(float(merged.loc[0, "home_manager_change_recent"]), 1.0)
+        self.assertAlmostEqual(float(merged.loc[0, "temperature_c"]), 18.5)
 
 
 if __name__ == "__main__":

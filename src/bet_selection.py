@@ -251,7 +251,7 @@ def write_probability_quality_report(
     run_ts: str,
     split_probs: Mapping[str, Mapping[str, np.ndarray]],
     split_y: Mapping[str, np.ndarray],
-) -> None:
+) -> list[dict]:
     rows = []
     for split, probs_by_model in split_probs.items():
         y_true = split_y[split]
@@ -272,10 +272,12 @@ def write_probability_quality_report(
             })
 
     append_rows_to_csv(config.final_probability_quality_file, rows)
-    print("\n" + "=" * 70)
-    print("=== PROBABILITY QUALITY REPORT ===")
-    print("=" * 70)
-    print(pd.DataFrame(rows).sort_values(["split", "logloss"]).to_string(index=False))
+    if config.print_full_reports:
+        print("\n" + "=" * 70)
+        print("=== PROBABILITY QUALITY REPORT ===")
+        print("=" * 70)
+        print(pd.DataFrame(rows).sort_values(["split", "logloss"]).to_string(index=False))
+    return rows
 
 
 def write_validation_selected_betting_reports(
@@ -421,26 +423,27 @@ def write_validation_selected_betting_reports(
 
     append_rows_to_csv(config.final_bet_selector_file, selector_rows)
     append_rows_to_csv(config.final_bet_bucket_file, bucket_rows)
-    print("\n" + "=" * 70)
-    print("=== VALIDATION-LOCKED BET SELECTOR ===")
-    print("=" * 70)
-    print(
-        pd.DataFrame(selector_rows)[
-            [
-                "model",
-                "selector_status",
-                "edge_threshold",
-                "min_probability",
-                "min_odds",
-                "max_odds",
-                "bets",
-                "roi",
-                "test_bets",
-                "test_hit_rate",
-                "test_roi",
-            ]
-        ].sort_values("test_roi", ascending=False).to_string(index=False)
-    )
+    if config.print_full_reports:
+        print("\n" + "=" * 70)
+        print("=== VALIDATION-LOCKED BET SELECTOR ===")
+        print("=" * 70)
+        print(
+            pd.DataFrame(selector_rows)[
+                [
+                    "model",
+                    "selector_status",
+                    "edge_threshold",
+                    "min_probability",
+                    "min_odds",
+                    "max_odds",
+                    "bets",
+                    "roi",
+                    "test_bets",
+                    "test_hit_rate",
+                    "test_roi",
+                ]
+            ].sort_values("test_roi", ascending=False).to_string(index=False)
+        )
     return selector_rows
 
 
@@ -553,7 +556,7 @@ def write_alternative_market_report(
     split_probs: Mapping[str, Mapping[str, np.ndarray]],
     split_X: Mapping[str, np.ndarray],
     split_match_info: Mapping[str, list[dict]],
-) -> None:
+) -> list[dict]:
     rows: list[dict] = []
     total_xg_idx = FEATURE_COLUMNS.index("total_xg")
 
@@ -687,17 +690,19 @@ def write_alternative_market_report(
         )
 
     append_rows_to_csv(config.final_alternative_markets_file, rows)
-    print("\n" + "=" * 70)
-    print("=== ALTERNATIVE MARKET AUDIT ===")
-    print("=" * 70)
-    print(pd.DataFrame(rows).sort_values(["split", "market", "model"]).to_string(index=False))
+    if config.print_full_reports:
+        print("\n" + "=" * 70)
+        print("=== ALTERNATIVE MARKET AUDIT ===")
+        print("=" * 70)
+        print(pd.DataFrame(rows).sort_values(["split", "market", "model"]).to_string(index=False))
+    return rows
 
 
 def write_data_enrichment_audit(
     config: ExperimentConfig,
     run_ts: str,
     split_match_info: Mapping[str, list[dict]],
-) -> None:
+) -> list[dict]:
     rows = []
     odds_triplets = {
         "opening_1x2_odds": ("open_odds_home", "open_odds_draw", "open_odds_away"),
@@ -735,7 +740,35 @@ def write_data_enrichment_audit(
             "note": "Line is loaded; handicap odds are not currently loaded.",
         })
 
-        for missing_group in ["confirmed_lineups", "injuries", "suspensions", "manager_changes", "live_odds_snapshots", "weather"]:
+        external_groups = {
+            "confirmed_lineups": ("lineup_available", ("home_lineup_strength", "away_lineup_strength")),
+            "injuries": ("team_news_available", ("home_injury_count", "away_injury_count")),
+            "suspensions": ("team_news_available", ("home_suspension_count", "away_suspension_count")),
+            "absences": ("team_news_available", ("home_absence_count", "away_absence_count")),
+            "key_absences": ("team_news_available", ("home_key_absence_count", "away_key_absence_count")),
+            "manager_changes": ("team_news_available", ("home_manager_change_recent", "away_manager_change_recent")),
+            "weather": ("weather_available", ("temperature_c", "wind_kph", "precipitation_mm")),
+        }
+        for data_group, (flag_col, value_cols) in external_groups.items():
+            available = 0
+            for row in match_info:
+                flag_available = flag_col in row and np.isfinite(_finite_float(row.get(flag_col))) and _finite_float(row.get(flag_col)) > 0
+                values_available = any(np.isfinite(_finite_float(row.get(col))) for col in value_cols)
+                if flag_available or values_available:
+                    available += 1
+            rows.append({
+                "run_ts_utc": run_ts,
+                "experiment_name": config.experiment_name,
+                "split": split,
+                "data_group": data_group,
+                "matches": len(match_info),
+                "available_rows": int(available),
+                "coverage": round((available / len(match_info) * 100.0) if match_info else 0.0, 4),
+                "status": "available" if available > 0 else "not_in_current_dataset",
+                "note": "Loaded from data/external/match_context.csv." if available > 0 else "Add pre-match rows to data/external/match_context.csv.",
+            })
+
+        for missing_group in ["live_odds_snapshots"]:
             rows.append({
                 "run_ts_utc": run_ts,
                 "experiment_name": config.experiment_name,
@@ -749,7 +782,9 @@ def write_data_enrichment_audit(
             })
 
     append_rows_to_csv(config.final_data_enrichment_file, rows)
-    print("\n" + "=" * 70)
-    print("=== DATA ENRICHMENT AUDIT ===")
-    print("=" * 70)
-    print(pd.DataFrame(rows).to_string(index=False))
+    if config.print_full_reports:
+        print("\n" + "=" * 70)
+        print("=== DATA ENRICHMENT AUDIT ===")
+        print("=" * 70)
+        print(pd.DataFrame(rows).to_string(index=False))
+    return rows

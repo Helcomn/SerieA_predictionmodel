@@ -6,13 +6,26 @@ __pycache__/
 .venv/
 venv/
 
+.env
+.env.*
+!.env.example
+
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
+# Generated model/report artifacts. Existing tracked artifacts are unaffected;
+# use `git add -f artifacts/<file>` only when you intentionally want to version one.
+artifacts/*
+!artifacts/paper_pages/
+!artifacts/paper_pages/**
 artifacts/*.tmp
+
 project_review.txt
 codex_response_log.txt
 model_explanation_local.txt
+
+# Optional/local enrichment datasets and API caches.
 data/external/*.csv
 data/external/*.parquet
+data/external/api_football_cache/

@@ -1,13 +1,4 @@
 from sklearn.metrics import log_loss
-from src.metrics import multiclass_brier, top_label_ece
-
-
-def print_prob_report(name, probs, y_true):
-    print(f"\n{name}:")
-    print("LogLoss:", round(log_loss(y_true, probs), 4))
-    print("Brier:", round(multiclass_brier(probs, y_true), 4))
-    print("ECE:", round(top_label_ece(probs, y_true), 4))
-
 
 
 def print_per_league_test_metrics(leagues, per_league_test, probs_meta, probs_mlp, probs_ens):

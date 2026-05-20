@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List
 
 
 @dataclass(frozen=True)
@@ -11,18 +10,23 @@ class ExperimentConfig:
     artifacts_dir: Path = Path("artifacts")
     train_cut: str = "2024-07-01"
     test_cut: str = "2025-07-01"
+    test_end: str | None = None
     leagues: tuple[str, ...] = ("england", "spain", "italy", "germany", "france")
     use_cached_artifacts: bool = True
-    force_retune_leagues: bool = True
-    force_retune_meta: bool = True
+    force_retune_leagues: bool = False
+    force_retune_meta: bool = False
     force_refit_meta_model: bool = True
-    force_retune_mlp: bool = True
+    force_retune_mlp: bool = False
     force_refit_mlp_model: bool = True
     force_retune_blend: bool = True
+    allow_partial_param_cache: bool = False
     random_state: int = 42
     max_upcoming_window_days: int = 4
     detailed_betting_log: bool = False
+    print_full_reports: bool = False
     print_verbose_audits: bool = False
+    print_parameter_impact: bool = False
+    generate_upcoming_picks: bool = True
 
     @property
     def params_file(self) -> Path:
@@ -104,7 +108,7 @@ class ExperimentConfig:
     def final_data_enrichment_file(self) -> Path:
         return self.artifacts_dir / f"final_data_enrichment_audit_{self.experiment_name}.csv"
 
-    def as_manifest(self) -> Dict:
+    def as_manifest(self) -> dict:
         data = asdict(self)
         data["artifacts_dir"] = str(self.artifacts_dir)
         data["leagues"] = list(self.leagues)

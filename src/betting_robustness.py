@@ -95,7 +95,7 @@ def write_betting_robustness_report(
     match_info: list[dict],
     *,
     edge_threshold: float,
-):
+) -> list[dict]:
     summary_rows: list[dict] = []
     curve_rows: list[dict] = []
 
@@ -149,7 +149,9 @@ def write_betting_robustness_report(
 
     append_rows_to_csv(config.final_betting_robustness_file, summary_rows)
     append_rows_to_csv(config.final_bet_curve_file, curve_rows)
-    _print_betting_robustness_summary(summary_rows)
+    if config.print_full_reports:
+        _print_betting_robustness_summary(summary_rows)
+    return summary_rows
 
 
 def _print_betting_robustness_summary(rows: list[dict]):
@@ -192,7 +194,7 @@ def write_league_specific_strategy_report(
     min_validation_bets: int = 20,
     min_fold_bets: int = 5,
     min_logloss_improvement_vs_market: float = 0.0,
-):
+) -> list[dict]:
     candidate_models = ["meta", "logreg", "mlp"]
     selection_rows: list[dict] = []
     selected_test_bets: list[pd.DataFrame] = []
@@ -313,7 +315,9 @@ def write_league_specific_strategy_report(
 
     append_rows_to_csv(config.final_league_model_selection_file, selection_rows)
     append_rows_to_csv(config.final_league_strategy_file, strategy_rows)
-    _print_league_specific_strategy_summary(selection_rows, strategy_rows)
+    if config.print_full_reports:
+        _print_league_specific_strategy_summary(selection_rows, strategy_rows)
+    return selection_rows
 
 
 def _print_league_specific_strategy_summary(selection_rows: list[dict], strategy_rows: list[dict]):

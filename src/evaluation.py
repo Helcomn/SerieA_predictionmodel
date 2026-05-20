@@ -3,20 +3,6 @@ import pandas as pd
 from sklearn.metrics import log_loss
 
 
-    
-
-def labels_from_df(df: pd.DataFrame) -> np.ndarray:
-    y = []
-    for _, r in df.iterrows():
-        if r["home_goals"] > r["away_goals"]:
-            y.append(0)
-        elif r["home_goals"] == r["away_goals"]:
-            y.append(1)
-        else:
-            y.append(2)
-    return np.array(y, dtype=int)
-
-
 def simulate_value_betting(
     probs,
     raw_odds,
@@ -63,7 +49,7 @@ def simulate_value_betting(
         # Find the best option based on EV
         best_ev, choice, odds_taken, label, prob_taken = max(evs, key=lambda x: x[0])
 
-        # Sanity Checks: Αγνοούμε εξωφρενικές αποδόσεις και εξωφρενικά EV
+        # Ignore extreme odds and implausibly high EV estimates.
         if odds_taken > max_odds or best_ev > max_ev:
             continue
 

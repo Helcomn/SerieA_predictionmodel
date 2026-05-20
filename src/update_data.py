@@ -10,6 +10,8 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
+from src.team_names import normalize_team_name
+
 # ============================================================
 # Historical data source (football-data.co.uk)
 # ============================================================
@@ -38,90 +40,6 @@ FIXTURE_SLUGS = {
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BASE_DIR = PROJECT_ROOT / "data" / "raw"
-
-# ------------------------------------------------------------
-# Optional team-name normalization
-# ------------------------------------------------------------
-TEAM_NAME_MAP = {
-    "england": {
-        "Spurs": "Tottenham",
-        "Man Utd": "Man United",
-        "Nottm Forest": "Nott'm Forest",
-    },
-    "spain": {
-        "Athletic Club": "Ath Bilbao",
-        "CA Osasuna": "Osasuna",
-        "Elche CF": "Elche",
-        "FC Barcelona": "Barcelona",
-        "Getafe CF": "Getafe",
-        "Girona FC": "Girona",
-        "Levante UD": "Levante",
-        "Rayo Vallecano": "Vallecano",
-        "RCD Mallorca": "Mallorca",
-        "Atlético Madrid": "Ath Madrid",
-        "Atlético de Madrid": "Ath Madrid",
-        "RCD Espanyol de Barcelona": "Espanol",
-        "Real Oviedo": "Oviedo",
-        "Villarreal CF": "Villarreal",
-        "Deportivo Alavés": "Alaves",
-        "RC Celta": "Celta",
-        "Real Sociedad": "Sociedad",
-        "Real Betis": "Betis",
-        "Sevilla FC": "Sevilla",
-        "Valencia CF": "Valencia",
-    },
-    "italy": {
-        "Inter Milan": "Inter",
-        "AC Milan": "Milan",
-        "Hellas Verona": "Verona",
-    },
-    "germany": {
-        "1. FC Heidenheim 1846": "Heidenheim",
-        "Borussia Dortmund": "Dortmund",
-        "Borussia Mönchengladbach": "M'gladbach",
-        "FC Bayern München": "Bayern Munich",
-        "1. FC Köln": "FC Koln",
-        "Eintracht Frankfurt": "Ein Frankfurt",
-        "FC Augsburg": "Augsburg",
-        "FC St. Pauli": "St Pauli",
-        "Hamburger SV": "Hamburg",
-        "1. FC Union Berlin": "Union Berlin",
-        "1. FSV Mainz 05": "Mainz",
-        "SV Werder Bremen": "Werder Bremen",
-        "TSG Hoffenheim": "Hoffenheim",
-        "VfB Stuttgart": "Stuttgart",
-        "VfL Wolfsburg": "Wolfsburg",
-        "Sport-Club Freiburg": "Freiburg",
-        "Bayer 04 Leverkusen": "Leverkusen",
-    },
-    "france": {
-        "Paris Saint-Germain": "Paris SG",
-        "Olympique de Marseille": "Marseille",
-        "Olympique Lyonnais": "Lyon",
-        "RC Strasbourg Alsace": "Strasbourg",
-        "Havre Athletic Club": "Le Havre",
-        "Stade Rennais FC": "Rennes",
-        "Stade Brestois 29": "Brest",
-        "AS Monaco": "Monaco",
-        "OGC Nice": "Nice",
-        "Angers SCO": "Angers",
-        "Toulouse FC": "Toulouse",
-        "FC Nantes": "Nantes",
-        "Paris FC": "Paris FC",
-        "AJ Auxerre": "Auxerre",
-        "FC Lorient": "Lorient",
-        "FC Metz": "Metz",
-        "LOSC Lille": "Lille",
-        "RC Lens": "Lens",
-    },
-}
-
-
-def normalize_team_name(name, league_folder):
-    if pd.isna(name):
-        return name
-    name = " ".join(str(name).strip().split())
-    return TEAM_NAME_MAP.get(league_folder, {}).get(name, name)
 
 
 def current_season_start_year(today: Optional[datetime] = None) -> int:

@@ -158,8 +158,15 @@ def _recent_team_means(team: str, past_matches: pd.DataFrame, window: int = 5) -
 
 def neutral_extra_features() -> np.ndarray:
     extra = np.zeros(EXTRA_AUX_LEN, dtype=float)
-    ou_idx = feature_indices(["ou25_over_prob"])[0] - 6 - BASE_AUX_LEN
-    extra[ou_idx] = 0.5
+    defaults = {
+        "ou25_over_prob": 0.5,
+        "home_lineup_strength": 1.0,
+        "away_lineup_strength": 1.0,
+        "temperature_c": 15.0,
+    }
+    for feature_name, value in defaults.items():
+        idx = feature_indices([feature_name])[0] - 6 - BASE_AUX_LEN
+        extra[idx] = value
     return extra
 
 
@@ -168,6 +175,13 @@ def _finite_or_default(value, default: float) -> float:
     if np.isfinite(value):
         return float(value)
     return float(default)
+
+
+def _weather_severity(temperature_c: float, wind_kph: float, precipitation_mm: float) -> float:
+    temp_discomfort = abs(float(temperature_c) - 15.0) / 20.0
+    wind_component = max(0.0, float(wind_kph)) / 40.0
+    rain_component = max(0.0, float(precipitation_mm)) / 10.0
+    return float(min(5.0, temp_discomfort + wind_component + rain_component))
 
 
 def compute_pre_match_extra_features(row: pd.Series, past_matches: pd.DataFrame, window: int = 5) -> np.ndarray:
@@ -193,6 +207,25 @@ def compute_pre_match_extra_features(row: pd.Series, past_matches: pd.DataFrame,
 
     ou25_over_prob = _finite_or_default(row.get("ou25_over_prob", np.nan), 0.5)
     ah_line = _finite_or_default(row.get("ah_line", np.nan), 0.0)
+    lineup_available = _finite_or_default(row.get("lineup_available", np.nan), 0.0)
+    home_lineup_strength = _finite_or_default(row.get("home_lineup_strength", np.nan), 1.0)
+    away_lineup_strength = _finite_or_default(row.get("away_lineup_strength", np.nan), 1.0)
+    team_news_available = _finite_or_default(row.get("team_news_available", np.nan), 0.0)
+    home_absence_count = _finite_or_default(row.get("home_absence_count", np.nan), 0.0)
+    away_absence_count = _finite_or_default(row.get("away_absence_count", np.nan), 0.0)
+    home_injury_count = _finite_or_default(row.get("home_injury_count", np.nan), 0.0)
+    away_injury_count = _finite_or_default(row.get("away_injury_count", np.nan), 0.0)
+    home_suspension_count = _finite_or_default(row.get("home_suspension_count", np.nan), 0.0)
+    away_suspension_count = _finite_or_default(row.get("away_suspension_count", np.nan), 0.0)
+    home_key_absence_count = _finite_or_default(row.get("home_key_absence_count", np.nan), 0.0)
+    away_key_absence_count = _finite_or_default(row.get("away_key_absence_count", np.nan), 0.0)
+    home_manager_change_recent = _finite_or_default(row.get("home_manager_change_recent", np.nan), 0.0)
+    away_manager_change_recent = _finite_or_default(row.get("away_manager_change_recent", np.nan), 0.0)
+    weather_available = _finite_or_default(row.get("weather_available", np.nan), 0.0)
+    temperature_c = _finite_or_default(row.get("temperature_c", np.nan), 15.0)
+    wind_kph = _finite_or_default(row.get("wind_kph", np.nan), 0.0)
+    precipitation_mm = _finite_or_default(row.get("precipitation_mm", np.nan), 0.0)
+    weather_severity = _weather_severity(temperature_c, wind_kph, precipitation_mm)
 
     extra = np.array([
         home_recent["shots"],
@@ -221,6 +254,31 @@ def compute_pre_match_extra_features(row: pd.Series, past_matches: pd.DataFrame,
         home_recent["uxpts"],
         away_recent["uxpts"],
         home_recent["uxpts"] - away_recent["uxpts"],
+        lineup_available,
+        home_lineup_strength,
+        away_lineup_strength,
+        home_lineup_strength - away_lineup_strength,
+        team_news_available,
+        home_absence_count,
+        away_absence_count,
+        home_absence_count - away_absence_count,
+        home_injury_count,
+        away_injury_count,
+        home_injury_count - away_injury_count,
+        home_suspension_count,
+        away_suspension_count,
+        home_suspension_count - away_suspension_count,
+        home_key_absence_count,
+        away_key_absence_count,
+        home_key_absence_count - away_key_absence_count,
+        home_manager_change_recent,
+        away_manager_change_recent,
+        home_manager_change_recent - away_manager_change_recent,
+        weather_available,
+        temperature_c,
+        wind_kph,
+        precipitation_mm,
+        weather_severity,
     ], dtype=float)
     if len(extra) != EXTRA_AUX_LEN:
         raise ValueError(f"Expected {EXTRA_AUX_LEN} extra features, got {len(extra)}")

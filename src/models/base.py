@@ -1,12 +1,41 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from sklearn.metrics import log_loss
 
 from src.calibration import fit_temperature, temperature_scale_probs
 from src.elo import compute_elo_ratings
-from src.poisson_model import fit_team_strengths, fit_team_strengths_weighted, match_outcome_probs, predict_lambdas
+from src.poisson_model import apply_elo_to_lambdas, fit_team_strengths, fit_team_strengths_weighted, match_outcome_probs, predict_lambdas
 from src.state_builder import streaming_block_probs_home_away
+
+
+def _validation_rows_with_elo(train_fit, val, *, K, home_adv):
+    train_tagged = train_fit.copy()
+    train_tagged["_is_tune_validation"] = False
+    train_tagged["_tune_validation_order"] = -1
+
+    val_tagged = val.copy()
+    val_tagged["_is_tune_validation"] = True
+    val_tagged["_tune_validation_order"] = np.arange(len(val_tagged))
+
+    full_tmp = (
+        pd.concat([train_tagged, val_tagged], ignore_index=True)
+        .sort_values(["date", "_is_tune_validation", "_tune_validation_order"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    elo_full = compute_elo_ratings(full_tmp, K=K, home_adv=home_adv, use_margin=True)
+    full_tmp["elo_home"], full_tmp["elo_away"] = zip(*elo_full)
+
+    val_part = (
+        full_tmp[full_tmp["_is_tune_validation"]]
+        .sort_values("_tune_validation_order", kind="mergesort")
+        .drop(columns=["_is_tune_validation", "_tune_validation_order"])
+        .reset_index(drop=True)
+    )
+    if len(val_part) != len(val):
+        raise ValueError(f"Validation tuning row alignment failed: expected {len(val)}, got {len(val_part)}")
+    return val_part
 
 
 def tune_league_params(train_fit, val, full_played_df):
@@ -17,36 +46,31 @@ def tune_league_params(train_fit, val, full_played_df):
 
     best = None
     print("\n--- Elo & Beta Tuning ---")
-    import pandas as pd
-    from src.poisson_model import apply_elo_to_lambdas
 
+    l_avg_h, l_avg_a, att, dfn = fit_team_strengths(train_fit)
     for K in Ks:
         for ha in home_advs:
+            val_part = _validation_rows_with_elo(train_fit, val, K=K, home_adv=ha)
+            val_inputs = []
+            y = []
+            for _, row in val_part.iterrows():
+                lh, la = predict_lambdas(row["home_team"], row["away_team"], l_avg_h, l_avg_a, att, dfn)
+                val_inputs.append((lh, la, row["elo_home"], row["elo_away"]))
+                if row["home_goals"] > row["away_goals"]:
+                    y.append(0)
+                elif row["home_goals"] == row["away_goals"]:
+                    y.append(1)
+                else:
+                    y.append(2)
+            y = np.array(y, dtype=int)
+
             for b in betas:
-                elo_pairs = compute_elo_ratings(train_fit, K=K, home_adv=ha, use_margin=True)
-                tmp = train_fit.copy()
-                tmp["elo_home"], tmp["elo_away"] = zip(*elo_pairs)
-                l_avg_h, l_avg_a, att, dfn = fit_team_strengths(tmp)
-
-                full_tmp = pd.concat([train_fit, val], ignore_index=True).sort_values("date")
-                elo_full = compute_elo_ratings(full_tmp, K=K, home_adv=ha, use_margin=True)
-                full_tmp["elo_home"], full_tmp["elo_away"] = zip(*elo_full)
-                val_part = full_tmp.iloc[len(train_fit):]
-
                 probs = []
-                y = []
-                for _, row in val_part.iterrows():
-                    lh, la = predict_lambdas(row["home_team"], row["away_team"], l_avg_h, l_avg_a, att, dfn)
-                    lh, la = apply_elo_to_lambdas(lh, la, row["elo_home"], row["elo_away"], beta=b)
+                for lh_base, la_base, elo_home, elo_away in val_inputs:
+                    lh, la = apply_elo_to_lambdas(lh_base, la_base, elo_home, elo_away, beta=b)
                     probs.append(match_outcome_probs(lh, la))
-                    if row["home_goals"] > row["away_goals"]:
-                        y.append(0)
-                    elif row["home_goals"] == row["away_goals"]:
-                        y.append(1)
-                    else:
-                        y.append(2)
 
-                ll = log_loss(np.array(y), np.array(probs))
+                ll = log_loss(y, np.array(probs))
                 if best is None or ll < best[0]:
                     best = (ll, K, ha, b)
 
@@ -57,17 +81,8 @@ def tune_league_params(train_fit, val, full_played_df):
     best_decay, best_decay_ll = None, float("inf")
     y_val = np.array([0 if r["home_goals"] > r["away_goals"] else 1 if r["home_goals"] == r["away_goals"] else 2 for _, r in val.iterrows()], dtype=int)
 
-    elo_full = compute_elo_ratings(
-        full_played_df[full_played_df["date"] < val["date"].max() + np.timedelta64(1, "D")],
-        K=best_K,
-        home_adv=best_ha,
-        use_margin=True,
-    )
-    tmp_df = full_played_df[full_played_df["date"] < val["date"].max() + np.timedelta64(1, "D")].copy()
-    tmp_df["elo_home"], tmp_df["elo_away"] = zip(*elo_full)
-    val_part = tmp_df[tmp_df["date"].isin(val["date"])].copy()
+    val_part = _validation_rows_with_elo(train_fit, val, K=best_K, home_adv=best_ha)
 
-    from src.poisson_model import apply_elo_to_lambdas
     for d in decays:
         l_avg_h, l_avg_a, att, dfn = fit_team_strengths_weighted(train_fit, decay=d)
         probs = []

@@ -4,6 +4,7 @@ import pandas as pd
 
 from src.team_names import normalize_team_name
 from src.understat_data import UNDERSTAT_VALUE_COLUMNS, add_understat_xg
+from src.external_context import EXTERNAL_CONTEXT_VALUE_COLUMNS, add_external_match_context
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -321,4 +322,8 @@ def load_league_data(league_name):
     for col in UNDERSTAT_VALUE_COLUMNS:
         if col not in out.columns:
             out[col] = np.nan
+    out = add_external_match_context(out, league_name)
+    for col in EXTERNAL_CONTEXT_VALUE_COLUMNS:
+        if col not in out.columns:
+            out[col] = 0.0 if col.endswith("_available") else np.nan
     return out

@@ -57,14 +57,14 @@ def fit_temperature(
     which would indicate the model is extremely over- or under-confident and
     the T range may need extending.
 
-    T > 1  →  softens probabilities (model is overconfident)
-    T < 1  →  sharpens probabilities (model is underconfident)
-    T = 1  →  no change (identity)
+    T > 1 -> softens probabilities (model is overconfident)
+    T < 1 -> sharpens probabilities (model is underconfident)
+    T = 1 -> no change (identity)
     """
     from scipy.optimize import minimize_scalar
 
     if T_grid is None:
-        # Finer grid, wider range — safe for proper logit-space scaling
+        # Finer grid, wider range; safe for proper logit-space scaling
         T_grid = np.concatenate([
             np.arange(T_min, 1.0,  0.05),
             np.arange(1.0,  T_max + 0.01, 0.1),

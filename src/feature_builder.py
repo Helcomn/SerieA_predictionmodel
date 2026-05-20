@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.calibration import safe_logit
+
 
 FEATURE_COLUMNS = [
     "model_logit_home", "model_logit_draw", "model_logit_away",
@@ -19,6 +21,16 @@ FEATURE_COLUMNS = [
     "understat_xg_for_home_5", "understat_xg_for_away_5", "understat_xg_diff_5",
     "understat_npxg_for_home_5", "understat_npxg_for_away_5", "understat_npxg_diff_5",
     "understat_xpts_home_5", "understat_xpts_away_5", "understat_xpts_diff_5",
+    "lineup_available",
+    "home_lineup_strength", "away_lineup_strength", "lineup_strength_diff",
+    "team_news_available",
+    "home_absence_count", "away_absence_count", "absence_count_diff",
+    "home_injury_count", "away_injury_count", "injury_count_diff",
+    "home_suspension_count", "away_suspension_count", "suspension_count_diff",
+    "home_key_absence_count", "away_key_absence_count", "key_absence_count_diff",
+    "home_manager_change_recent", "away_manager_change_recent", "manager_change_recent_diff",
+    "weather_available",
+    "temperature_c", "wind_kph", "precipitation_mm", "weather_severity",
 ]
 
 MLP_DEFAULT_FEATURE_COLUMNS = [
@@ -41,12 +53,26 @@ UNDERSTAT_XG_FEATURE_COLUMNS = [
     "understat_npxg_for_home_5", "understat_npxg_for_away_5", "understat_npxg_diff_5",
     "understat_xpts_home_5", "understat_xpts_away_5", "understat_xpts_diff_5",
 ]
+TEAM_NEWS_FEATURE_COLUMNS = [
+    "lineup_available",
+    "home_lineup_strength", "away_lineup_strength", "lineup_strength_diff",
+    "team_news_available",
+    "home_absence_count", "away_absence_count", "absence_count_diff",
+    "home_injury_count", "away_injury_count", "injury_count_diff",
+    "home_suspension_count", "away_suspension_count", "suspension_count_diff",
+    "home_key_absence_count", "away_key_absence_count", "key_absence_count_diff",
+    "home_manager_change_recent", "away_manager_change_recent", "manager_change_recent_diff",
+]
+WEATHER_FEATURE_COLUMNS = [
+    "weather_available", "temperature_c", "wind_kph", "precipitation_mm", "weather_severity",
+]
+EXTERNAL_CONTEXT_FEATURE_COLUMNS = TEAM_NEWS_FEATURE_COLUMNS + WEATHER_FEATURE_COLUMNS
 BASE_NON_MARKET_FEATURE_COLUMNS = [
     col for col in FEATURE_COLUMNS
     if not col.startswith("market_logit_") and col not in MARKET_CONTEXT_FEATURE_COLUMNS
 ]
 NEW_LOCAL_FEATURE_COLUMNS = LOCAL_STATS_FEATURE_COLUMNS + MARKET_CONTEXT_FEATURE_COLUMNS
-NEW_DATA_FEATURE_COLUMNS = NEW_LOCAL_FEATURE_COLUMNS + UNDERSTAT_XG_FEATURE_COLUMNS
+NEW_DATA_FEATURE_COLUMNS = NEW_LOCAL_FEATURE_COLUMNS + UNDERSTAT_XG_FEATURE_COLUMNS + EXTERNAL_CONTEXT_FEATURE_COLUMNS
 
 
 def feature_indices(feature_names: list[str] | tuple[str, ...]) -> list[int]:
@@ -67,11 +93,6 @@ def market_probs_from_odds_row(odds_h, odds_d, odds_a):
     if s <= 0:
         return np.array([np.nan, np.nan, np.nan], dtype=float)
     return inv / s
-
-
-def safe_logit(p, eps=1e-12):
-    p = np.clip(p, eps, 1 - eps)
-    return np.log(p) - np.log(1 - p)
 
 
 def ensure_market_probs(model_probs: np.ndarray, market_probs: np.ndarray) -> np.ndarray:

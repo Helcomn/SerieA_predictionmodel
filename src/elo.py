@@ -1,26 +1,9 @@
 import pandas as pd
-import numpy as np
 from typing import Dict, List, Tuple
+
 
 def expected_score(r_home, r_away):
     return 1 / (1 + 10 ** ((r_away - r_home) / 400))
-
-
-def update_elo(r_home, r_away, home_goals, away_goals, K=20):
-    exp_home = expected_score(r_home, r_away)
-    exp_away = 1 - exp_home
-
-    if home_goals > away_goals:
-        s_home, s_away = 1, 0
-    elif home_goals == away_goals:
-        s_home, s_away = 0.5, 0.5
-    else:
-        s_home, s_away = 0, 1
-
-    new_home = r_home + K * (s_home - exp_home)
-    new_away = r_away + K * (s_away - exp_away)
-
-    return new_home, new_away
 
 
 def match_result(home_goals: int, away_goals: int) -> Tuple[float, float]:
@@ -40,6 +23,8 @@ def margin_multiplier(goal_diff: int) -> float:
     if d == 3:
         return 1.75
     return 2.0
+
+
 def get_dynamic_init(ratings: Dict[str, float], default_init: float) -> float:
     """
     Calculates the entry Elo rating for a newly promoted team based on the 
@@ -49,6 +34,7 @@ def get_dynamic_init(ratings: Dict[str, float], default_init: float) -> float:
         bottom_elos = sorted(ratings.values())[:3]
         return float(sum(bottom_elos) / len(bottom_elos))
     return float(default_init)
+
 
 def compute_elo_ratings(
     df: pd.DataFrame,
@@ -75,8 +61,10 @@ def compute_elo_ratings(
         r_away = float(ratings.get(away, current_init))
         
         # Register new teams immediately to prevent double-counting as "new"
-        if home not in ratings: ratings[home] = r_home
-        if away not in ratings: ratings[away] = r_away
+        if home not in ratings:
+            ratings[home] = r_home
+        if away not in ratings:
+            ratings[away] = r_away
 
         # Store pre-match ratings
         elo_history.append((r_home, r_away))
